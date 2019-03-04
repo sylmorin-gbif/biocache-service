@@ -20,9 +20,14 @@ import au.org.ala.biocache.dao.SearchDAO;
 import au.org.ala.biocache.dao.SearchDAOImpl;
 import au.org.ala.biocache.dto.*;
 import au.org.ala.biocache.model.Qid;
+import au.org.ala.biocache.util.SearchUtils;
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.log4j.Logger;
+import org.apache.solr.client.solrj.SolrQuery;
+import org.apache.solr.client.solrj.response.QueryResponse;
+import org.apache.solr.common.util.SimpleOrderedMap;
+import org.springframework.aop.framework.Advised;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.web.bind.annotation.*;
@@ -113,51 +118,27 @@ public class ExploreController {
             requestParams.setFq(new String[]{"species_group:\"" + speciesGroup +"\""});
         }
 
-        //retrieve a list of subgroups with occurrences matching the query
-        SearchResultDTO speciesSubgroupCounts = searchDao.findByFulltextSpatialQuery(requestParams, null);
-        Map<String, Long> occurrenceCounts = new HashMap<String,Long>();
-        if(speciesSubgroupCounts.getFacetResults().size() > 0) {
-            FacetResultDTO result = speciesSubgroupCounts.getFacetResults().iterator().next();
-            for(FieldResultDTO fr: result.getFieldResult()){
-                occurrenceCounts.put(fr.getLabel(), fr.getCount());
-            }
-        }
+        SolrQuery query = ((SearchDAOImpl) ((Advised) searchDao).getTargetSource().getTarget()).searchRequestToSolrQuery(requestParams, null, null);
 
-        //do a facet query for each species subgroup
-        for(String ssg : occurrenceCounts.keySet()){
+        query.add("json.facet", "{ species_subgroups:{ type : terms, field: species_subgroup, limit: -1,facet:{unique : \"unique(taxon_name)\"}}}");
+        QueryResponse qr = ((SearchDAOImpl) ((Advised) searchDao).getTargetSource().getTarget()).query(query, null);
 
-            requestParams.setQ("species_subgroup:\"" + ssg +"\"");
-            requestParams.setFormattedQuery(null);
-            requestParams.setFacets(new String[]{"taxon_name"});
-
-            List<FacetResultDTO> facetResultDTO = searchDao.getFacetCounts(requestParams);
-            if(facetResultDTO.size() > 0){
-                FacetResultDTO result = facetResultDTO.get(0);
-
-                String parentName = parentLookup.get(ssg.toLowerCase());
-                SpeciesGroupDTO parentGroup = parentGroupMap.get(parentName);
-                if(parentGroup != null){
-                    if(parentGroup.getChildGroups() == null){
-                        parentGroup.setChildGroups(new ArrayList<SpeciesGroupDTO>());
-                    }
-                    parentGroup.getChildGroups().add(new SpeciesGroupDTO(ssg, result.getCount(), occurrenceCounts.get(ssg), 2));
-                    parentGroup.setSpeciesCount(parentGroup.getSpeciesCount() + result.getCount());
-                    parentGroup.setCount(parentGroup.getCount() + occurrenceCounts.get(ssg));
-                } else {
-                    logger.warn("Parent group lookup failed for: " + parentName + ", ssg: " + ssg);
+        for (SimpleOrderedMap facet : SearchUtils.getList(qr.getResponse(), "facets", "species_subgroups", "buckets")) {
+            String ssg = (String) facet.getVal(0);
+            Integer count = (Integer) facet.getVal(1);
+            Integer unique = (Integer) facet.getVal(2);
+            String parentName = parentLookup.get(ssg.toLowerCase());
+            SpeciesGroupDTO parentGroup = parentGroupMap.get(parentName);
+            if (parentGroup != null) {
+                if (parentGroup.getChildGroups() == null) {
+                    parentGroup.setChildGroups(new ArrayList<SpeciesGroupDTO>());
                 }
+                parentGroup.getChildGroups().add(new SpeciesGroupDTO(ssg, unique, count, 2));
+                parentGroup.setSpeciesCount(parentGroup.getSpeciesCount() + unique);
+                parentGroup.setCount(parentGroup.getCount() + count);
+            } else {
+                logger.warn("Parent group lookup failed for: " + parentName + ", ssg: " + ssg);
             }
-        }
-
-        //prune empty parents
-        List<String> toRemove = new ArrayList<String>();
-        for(String parentName: parentGroupMap.keySet()){
-            if(parentGroupMap.get(parentName).getChildGroups()==null || parentGroupMap.get(parentName).getChildGroups().size()==0){
-                toRemove.add(parentName);
-            }
-        }
-        for(String key: toRemove){
-            parentGroupMap.remove(key);
         }
 
         return parentGroupMap.values();
@@ -231,20 +212,15 @@ public class ExploreController {
         requestParams.setPageSize(0);
         requestParams.setFacets(new String[]{"taxon_name"});
         requestParams.setFlimit(-1);
-        SearchResultDTO results = searchDao.findByFulltextSpatialQuery(requestParams, null);
-        Integer speciesCount = 0;
-        if(results.getFacetResults().size() > 0){
-            List<FieldResultDTO> fieldResults = results.getFacetResults().iterator().next().getFieldResult();
-            int count = 0;
-            for (FieldResultDTO fr :  fieldResults){
-                if(fr.getCount() !=0 && !fr.getLabel().equalsIgnoreCase("Unknown")){
-                    count++;
-                }
-            }
-            speciesCount = count;
-        }
 
-        return new Integer[]{(int) results.getTotalRecords(), speciesCount};
+        SolrQuery query = ((SearchDAOImpl) ((Advised) searchDao).getTargetSource().getTarget()).searchRequestToSolrQuery(requestParams, null, null);
+
+        query.add("json.facet", "{ unique: \"unique(taxon_name)\" }");
+        QueryResponse qr = ((SearchDAOImpl) ((Advised) searchDao).getTargetSource().getTarget()).query(query, null);
+
+        SimpleOrderedMap facets = (SimpleOrderedMap) qr.getResponse().get("facets");
+
+        return new Integer[]{(Integer) facets.get("count"), (Integer) facets.get("unique")};
     }
 
     /**

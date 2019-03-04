@@ -1,12 +1,12 @@
 /**************************************************************************
  *  Copyright (C) 2013 Atlas of Living Australia
  *  All Rights Reserved.
- * 
+ *
  *  The contents of this file are subject to the Mozilla Public
  *  License Version 1.1 (the "License"); you may not use this file
  *  except in compliance with the License. You may obtain a copy of
  *  the License at http://www.mozilla.org/MPL/
- * 
+ *
  *  Software distributed under the License is distributed on an "AS
  *  IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
  *  implied. See the License for the specific language governing
@@ -27,6 +27,8 @@ import au.org.ala.biocache.stream.OptionalZipOutputStream;
 import au.org.ala.biocache.util.AlaFileUtils;
 import au.org.ala.biocache.util.thread.DownloadControlThread;
 import au.org.ala.biocache.util.thread.DownloadCreator;
+import au.org.ala.biocache.util.thread.UserBalancedDownload;
+import au.org.ala.biocache.util.thread.UserBalancedThreadPoolExecutor;
 import au.org.ala.biocache.writer.RecordWriterException;
 import au.org.ala.doi.CreateDoiResponse;
 import com.google.common.collect.Lists;
@@ -64,7 +66,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Services to perform the downloads.
- * 
+ *
  * Can configure the number of off-line download processors
  *
  * @author Natasha Carter (natasha.carter@csiro.au)
@@ -169,15 +171,15 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
     protected String biocacheDownloadDoiLandingPage = "https://doi-test.ala.org.au/doi/";
 
     /**
-     * A delay (in milliseconds) between minting the DOI, and sending emails containing 
+     * A delay (in milliseconds) between minting the DOI, and sending emails containing
      * the DOI to allow for the DOI registration to propagate to upstream DOI providers.
-     * 
-     * Users have commented that the DOI is not resolvable when they receive the email 
+     *
+     * Users have commented that the DOI is not resolvable when they receive the email
      * and this is the configuration setting to tweak to improve that behaviour.
-     * 
-     * Note that this delay starts after the chosen DOI provider has confirmed that 
-     * they have successfully minted the DOI. Hence, there are no issues with setting 
-     * it to zero if the DOI provider is known not to be propagating the registration 
+     *
+     * Note that this delay starts after the chosen DOI provider has confirmed that
+     * they have successfully minted the DOI. Hence, there are no issues with setting
+     * it to zero if the DOI provider is known not to be propagating the registration
      * to another upstream DOI provider before it is resolvable.
      */
     @Value("${download.doi.propagation.delay:60000}")
@@ -382,10 +384,11 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
             synchronized(this) {
                 nextExecutor = offlineParallelQueryExecutor;
                 if(nextExecutor == null) {
-                    nextExecutor = offlineParallelQueryExecutor = Executors.newFixedThreadPool(
-                                                                getMaxOfflineParallelDownloadThreads(),
-                                                                new ThreadFactoryBuilder().setNameFormat("biocache-query-offline-%d")
-                                                                .setPriority(Thread.MIN_PRIORITY).build());
+                    nextExecutor = offlineParallelQueryExecutor = new UserBalancedThreadPoolExecutor(
+                            getMaxOfflineParallelDownloadThreads(), getMaxOfflineParallelDownloadThreads(),
+                            0L, TimeUnit.MILLISECONDS,
+                            new ThreadFactoryBuilder().setNameFormat("biocache-query-offline-%d")
+                                    .setPriority(Thread.MIN_PRIORITY).build());
                 }
             }
         }
@@ -496,42 +499,19 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
     /**
      * Writes the supplied download to the supplied output stream. It will
      * include all the appropriate citations etc.
-     * 
-     * @param dd
-     * @param requestParams
-     * @param ip
-     * @param out
-     * @param includeSensitive
-     * @param fromIndex
-     * @throws Exception
-     * @deprecated Use {@link #writeQueryToStream(DownloadDetailsDTO, DownloadRequestParams, String, OutputStream, boolean, boolean, boolean, boolean, ExecutorService, List)} instead.
-     */
-    @Deprecated
-    public void writeQueryToStream(DownloadDetailsDTO dd, DownloadRequestParams requestParams, String ip,
-            OutputStream out, boolean includeSensitive, boolean fromIndex, boolean limit, boolean zip)
-            throws Exception {
-        afterInitialisation();
-
-        writeQueryToStream(dd, requestParams, ip, out, includeSensitive, fromIndex, limit, zip, getOfflineThreadPoolExecutor(), null);
-    }
-
-    /**
-     * Writes the supplied download to the supplied output stream. It will
-     * include all the appropriate citations etc.
      *
-     * @param dd
-     * @param requestParams
-     * @param ip
+     * @param downloadDetails
      * @param out
-     * @param includeSensitive
      * @param fromIndex
      * @param doiResponseList Return the CreateDoiResponse instance as the first element of the list if requestParams.mintDoi was true
      * @throws Exception
      */
-    public void writeQueryToStream(DownloadDetailsDTO dd, DownloadRequestParams requestParams, String ip,
-                                   OutputStream out, boolean includeSensitive, boolean fromIndex, boolean limit, boolean zip, ExecutorService parallelExecutor, List<CreateDoiResponse> doiResponseList)
+    public void writeQueryToStream(DownloadDetailsDTO downloadDetails, OutputStream out, boolean fromIndex,
+                                   boolean limit, boolean zip, ExecutorService parallelExecutor,
+                                   List<CreateDoiResponse> doiResponseList)
             throws Exception {
         afterInitialisation();
+        DownloadRequestParams requestParams = downloadDetails.getRequestParams();
         String filename = requestParams.getFile();
         String originalParams = requestParams.toString();
 
@@ -548,25 +528,25 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
             } else {
                 requestParams.setFacets(new String[] { "data_resource_uid" });
             }
-            
+
             final ConcurrentMap<String, AtomicInteger> uidStats;
             if (fromIndex) {
-                uidStats = searchDAO.writeResultsFromIndexToStream(requestParams, sp, includeSensitive, dd, limit, parallelExecutor);
+                uidStats = searchDAO.writeResultsFromIndexToStream(sp, downloadDetails, limit, parallelExecutor);
             } else {
-                uidStats = searchDAO.writeResultsToStream(requestParams, sp, 100, includeSensitive, dd, limit);
+                uidStats = searchDAO.writeResultsToStream(sp, downloadDetails, limit);
             }
 
             sp.closeEntry();
 
             // add the readme for the Shape file header mappings if necessary
-            if (dd.getHeaderMap() != null) {
+            if (downloadDetails.getHeaderMap() != null) {
                 sp.putNextEntry("Shape-README.html");
                 sp.write(
                         ("The name of features is limited to 10 characters. Listed below are the mappings of feature name to download field:")
                                 .getBytes(StandardCharsets.UTF_8));
                 sp.write(("<table><td><b>Feature</b></td><td><b>Download Field<b></td>").getBytes(StandardCharsets.UTF_8));
-                for (String key : dd.getHeaderMap().keySet()) {
-                    sp.write(("<tr><td>" + key + "</td><td>" + dd.getHeaderMap().get(key) + "</td></tr>").getBytes(StandardCharsets.UTF_8));
+                for (String key : downloadDetails.getHeaderMap().keySet()) {
+                    sp.write(("<tr><td>" + key + "</td><td>" + downloadDetails.getHeaderMap().get(key) + "</td></tr>").getBytes(StandardCharsets.UTF_8));
                 }
                 sp.write(("</table>").getBytes(StandardCharsets.UTF_8));
             }
@@ -599,7 +579,7 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
 
                     if(mintDoi) {
 
-                        Map<String, ?> userDetails = authService.getUserDetails(dd.getEmail());
+                        Map<String, ?> userDetails = authService.getUserDetails(downloadDetails.getEmail());
 
                         //Source requester details
                         String requesterId = (String) userDetails.get("userId");
@@ -625,14 +605,14 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
                             doiDetails.setTitle(biocacheDownloadDoiTitlePrefix + filename);
                             doiDetails.setApplicationUrl(searchUrl);
                             doiDetails.setRequesterId(requesterId);
-                            if (dd.getSensitiveFq() != null) {
+                            if (downloadDetails.getSensitiveFq() != null) {
                                 doiDetails.setAuthorisedRoles(getSensitiveRolesForUser(requesterId));
                             }
 
                             doiDetails.setRequesterName(requesterName);
                             doiDetails.setDatasetMetadata(datasetMetadata);
-                            doiDetails.setRequestTime(dd.getStartDateString());
-                            doiDetails.setRecordCount(dd.getTotalRecords());
+                            doiDetails.setRequestTime(downloadDetails.getStartDateString());
+                            doiDetails.setRecordCount(downloadDetails.getTotalRecords());
                             doiDetails.setLicence(licence);
                             doiDetails.setQueryTitle(requestParams.getDisplayString());
 
@@ -645,7 +625,7 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
                             logger.debug("DOI minted: " + doiResponse.getDoi());
                             doiResponseList.add (doiResponse);
                         } else {
-                            logger.error("DOI minting failed for path " + dd.getFileLocation());
+                            logger.error("DOI minting failed for path " + downloadDetails.getFileLocation());
                         }
                     }
                 } else {
@@ -656,11 +636,11 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
 
                 // online downloads will not have a file location or request params set
                 // in dd.
-                if (dd.getRequestParams() == null) {
-                    dd.setRequestParams(requestParams);
+                if (downloadDetails.getRequestParams() == null) {
+                    downloadDetails.setRequestParams(requestParams);
                 }
-                if (dd.getFileLocation() == null) {
-                    dd.setFileLocation(searchUrl);
+                if (downloadDetails.getFileLocation() == null) {
+                    downloadDetails.setFileLocation(searchUrl);
                 }
 
                 // add the Readme for the data field descriptions
@@ -682,7 +662,7 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
 
                 } else {
                     readmeFile = biocacheDownloadReadmeTemplate;
-                    fileLocation = dd.getFileLocation().replace(biocacheDownloadDir, biocacheDownloadUrl);
+                    fileLocation = downloadDetails.getFileLocation().replace(biocacheDownloadDir, biocacheDownloadUrl);
                 }
 
                 String readmeTemplate = "";
@@ -691,9 +671,9 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
                 }
 
                 String readmeContent = readmeTemplate.replace("[url]", fileLocation)
-                        .replace("[date]", dd.getStartDateString())
+                        .replace("[date]", downloadDetails.getStartDateString())
                         .replace("[searchUrl]", searchUrl)
-                        .replace("[queryTitle]", dd.getRequestParams().getDisplayString())
+                        .replace("[queryTitle]", downloadDetails.getRequestParams().getDisplayString())
                         .replace("[dataProviders]", dataProviders)
                         .replace("[doi]", doi);
 
@@ -707,7 +687,7 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
                     // add the citations for the supplied uids
                     sp.putNextEntry("headings.csv");
                     try {
-                        getHeadings(uidStats, sp, requestParams, dd.getMiscFields());
+                        getHeadings(uidStats, sp, requestParams, downloadDetails.getMiscFields());
                     } catch (Exception e) {
                         logger.error(e.getMessage(), e);
                     }
@@ -737,7 +717,7 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
 
                 // log the stats to ala logger
                 LogEventVO vo = new LogEventVO(1002, requestParams.getReasonTypeId(), requestParams.getSourceTypeId(),
-                        requestParams.getEmail(), requestParams.getReason(), ip, null, uidStats, sourceUrl);
+                        requestParams.getEmail(), requestParams.getReason(), downloadDetails.getIpAddress(), null, uidStats, sourceUrl);
                 logger.log(RestLevel.REMOTE, vo);
             }
         } catch (RecordWriterException e) {
@@ -748,26 +728,6 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
             throw e;
         }
     }
-
-    /**
-     *
-     * @param requestParams
-     * @param response
-     * @param ip
-     * @param out
-     * @param includeSensitive
-     * @param fromIndex
-     * @param zip
-     * @throws Exception
-     * @deprecated Use {@link #writeQueryToStream(DownloadRequestParams, HttpServletResponse, String, OutputStream, boolean, boolean, boolean, ExecutorService)} instead.
-     */
-    @Deprecated
-    public void writeQueryToStream(DownloadRequestParams requestParams, HttpServletResponse response, String ip,
-            OutputStream out, boolean includeSensitive, boolean fromIndex, boolean zip) throws Exception {
-        afterInitialisation();
-        writeQueryToStream(requestParams, response, ip, out, includeSensitive, fromIndex, zip, getOfflineThreadPoolExecutor());
-    }
-
 
     public void writeQueryToStream(DownloadRequestParams requestParams, HttpServletResponse response, String ip,
             OutputStream out, boolean includeSensitive, boolean fromIndex, boolean zip, ExecutorService parallelQueryExecutor) throws Exception {
@@ -786,14 +746,15 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
         }
 
         DownloadDetailsDTO.DownloadType type = fromIndex ? DownloadType.RECORDS_INDEX : DownloadType.RECORDS_DB;
-        DownloadDetailsDTO dd = registerDownload(requestParams, ip, type);
-        writeQueryToStream(dd, requestParams, ip, new CloseShieldOutputStream(out), includeSensitive, fromIndex, true, zip, parallelQueryExecutor, null);
+        DownloadDetailsDTO downloadDetails = registerDownload(requestParams, ip, type);
+        downloadDetails.setIncludeSensitive(includeSensitive);
+        writeQueryToStream(downloadDetails, new CloseShieldOutputStream(out), fromIndex, true, zip, parallelQueryExecutor, null);
     }
 
     /**
      * get citation info from citation web service and write it into
      * citation.txt file.
-     * 
+     *
      * @param uidStats
      * @param out
      * @param datasetMetadata
@@ -891,7 +852,7 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
     /**
      * get headings info from index/fields web service and write it into
      * headings.csv file.
-     * 
+     *
      * output columns: column name field requested dwc description info field
      *
      * @param out
@@ -1185,180 +1146,7 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
     private class DownloadCreatorImpl implements DownloadCreator {
         @Override
         public Callable<DownloadDetailsDTO> createCallable(final DownloadDetailsDTO currentDownload, final long executionDelay, final Semaphore capacitySemaphore, final ExecutorService parallelExecutor) {
-            return new Callable<DownloadDetailsDTO>() {
-
-                @Override
-                public DownloadDetailsDTO call() throws Exception {
-                    try {
-                        if(logger.isInfoEnabled()) {
-                            logger.info("Starting to download the offline request: " + currentDownload);
-                        }
-                        Thread.sleep(executionDelay);
-                        // we are now ready to start the download
-                        // we need to create an output stream to the file system
-
-                        boolean shuttingDown = false;
-                        boolean doRetry = false;
-
-                        try (FileOutputStream fos = FileUtils
-                                .openOutputStream(new File(currentDownload.getFileLocation()));) {
-                            // cannot include misc columns if shp
-                            if (!currentDownload.getRequestParams().getFileType().equals("csv")
-                                    && currentDownload.getRequestParams().getIncludeMisc()) {
-                                currentDownload.getRequestParams().setIncludeMisc(false);
-                            }
-
-                            List<CreateDoiResponse> doiResponseList = null;
-                            Boolean mintDoi = currentDownload.getRequestParams().getMintDoi();
-
-                            String doiFailureMessage = "";
-                            if(mintDoi) {
-                                doiResponseList = new ArrayList<>();
-                            }
-                            writeQueryToStream(currentDownload, currentDownload.getRequestParams(),
-                                    currentDownload.getIpAddress(), new CloseShieldOutputStream(fos), currentDownload.getIncludeSensitive(),
-                                    currentDownload.getDownloadType() == DownloadType.RECORDS_INDEX, false, true, parallelExecutor, doiResponseList);
-
-                            if(mintDoi && doiResponseList.size() <= 0) {
-                                //DOI Minting failed
-                                doiFailureMessage = biocacheDownloadDoiFailureMessage;
-                                mintDoi = false; //Prevent any updates
-                            }
-
-                            // now that the download is complete email a link to the
-                            // recipient.
-                            final String hubName = currentDownload.getRequestParams().getHubName() != null ? currentDownload.getRequestParams().getHubName() : "ALA";
-                            String subject = messageSource.getMessage("offlineEmailSubject", null,
-                                    biocacheDownloadEmailSubject.replace("[filename]",
-                                            currentDownload.getRequestParams().getFile())
-                                    .replace("[hubName]",hubName),
-                                    null);
-
-                            if (currentDownload != null && currentDownload.getFileLocation() != null) {
-                                insertMiscHeader(currentDownload);
-
-                                //ensure new directories have correct permissions
-                                new File(currentDownload.getFileLocation()).getParentFile().setExecutable(true, false);
-                                new File(currentDownload.getFileLocation()).getParentFile().getParentFile().setExecutable(true, false);
-
-
-                                String archiveFileLocation = biocacheDownloadUrl + File.separator + URLEncoder.encode(currentDownload.getFileLocation().replace(biocacheDownloadDir + "/",""), "UTF-8").replace("%2F", "/").replace("+", "%20");
-
-                                String doiStr = "";
-                                String emailBody;
-                                String emailTemplate;
-                                String downloadFileLocation;
-                                if(mintDoi && doiResponseList != null && !doiResponseList.isEmpty() && doiResponseList.get(0) != null) {
-
-                                    CreateDoiResponse doiResponse;
-                                    doiResponse = doiResponseList.get(0);
-                                    try {
-                                        doiService.updateFile(doiResponse.getUuid(), currentDownload.getFileLocation());
-                                        doiStr = doiResponse.getDoi();
-                                        emailTemplate = biocacheDownloadDoiEmailTemplate;
-
-                                        // TODO: The downloads-plugin has issues with unencoded user queries 
-                                        // Working around that by hardcoding the official DOI resolution service as the landing page
-                                        // https://github.com/AtlasOfLivingAustralia/biocache-service/issues/311
-                                        //final String doiLandingPage = currentDownload.getRequestParams().getDoiDisplayUrl() != null ? currentDownload.getRequestParams().getDoiDisplayUrl() : biocacheDownloadDoiLandingPage;
-                                        //downloadFileLocation = doiLandingPage + doiStr;
-                                        downloadFileLocation = OFFICIAL_DOI_RESOLVER + doiStr;
-                                    }
-                                    catch (Exception ex) {
-                                        logger.error("DOI update failed for DOI uuid " + doiResponse.getUuid() +
-                                                " and path " + currentDownload.getFileLocation(), ex);
-                                        doiFailureMessage = biocacheDownloadDoiFailureMessage;
-                                        emailTemplate = biocacheDownloadEmailTemplate;
-                                        downloadFileLocation = archiveFileLocation;
-                                    }
-                                } else {
-                                    emailTemplate = biocacheDownloadEmailTemplate;
-                                    downloadFileLocation = archiveFileLocation;
-                                }
-
-                                emailBody = Files.asCharSource(new File(emailTemplate), StandardCharsets.UTF_8).read();
-
-                                final String searchUrl = generateSearchUrl(currentDownload.getRequestParams());
-                                String emailBodyHtml = emailBody.replace("[url]", downloadFileLocation)
-                                        .replace("[date]", currentDownload.getStartDateString())
-                                        .replace("[searchUrl]", searchUrl)
-                                        .replace("[queryTitle]", currentDownload.getRequestParams().getDisplayString())
-                                        .replace("[doi]", doiStr)
-                                        .replace("[doiFailureMessage]", doiFailureMessage);
-                                String body = messageSource.getMessage("offlineEmailBody",
-                                        new Object[]{archiveFileLocation, searchUrl, currentDownload.getStartDateString()},
-                                        emailBodyHtml, null);
-
-                                // save the statistics to the download directory
-                                try (FileOutputStream statsStream = FileUtils
-                                        .openOutputStream(new File(new File(currentDownload.getFileLocation()).getParent()
-                                                + File.separator + "downloadStats.json"))) {
-                                    objectMapper.writeValue(statsStream, currentDownload);
-                                }
-
-                                if(mintDoi && doiResponseList != null && !doiResponseList.isEmpty() && doiResponseList.get(0) != null) {
-                                    // Delay sending the email to allow the DOI to propagate through to upstream DOI providers
-                                    Thread.sleep(doiPropagationDelay);
-                                }
-                                emailService.sendEmail(currentDownload.getEmail(), subject, body);
-                            }
-
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            //shutting down
-                            shuttingDown = true;
-                            throw e;
-                        } catch (CancellationException e) {
-                            //download cancelled, do not send an email
-                        } catch (com.datastax.driver.core.exceptions.DriverException e) {
-                            logger.warn("Offline download failed. Cassandra driver error. Retrying in 5 mins. Task file: " + currentDownload.getFileLocation() + " : " + e.getMessage(), e);
-                            //return to queue in 5mins as long as the VM is not restarted during that time, in which case it could be permanently stuck in a broken state
-                            doRetry = true;
-                            newRetryThread(currentDownload).start();
-                        } catch (PelopsException e) {
-                            logger.warn("Offline download failed. Cassandra error. Retrying in 5 mins. Task file: " + currentDownload.getFileLocation() + " : " + e.getMessage(), e);
-                            //return to queue in 5mins as long as the VM is not restarted during that time, in which case it could be permanently stuck in a broken state
-                            doRetry = true;
-                            newRetryThread(currentDownload).start();
-                        } catch (Exception e) {
-                            logger.error("Error in offline download, sending email. download path: "
-                                    + currentDownload.getFileLocation(), e);
-
-                            try {
-                                final String hubName = currentDownload.getRequestParams().getHubName() != null ? currentDownload.getRequestParams().getHubName() : "ALA";
-                                String subject = messageSource.getMessage("offlineEmailSubjectError", null,
-                                        biocacheDownloadEmailSubjectError.replace("[filename]",
-                                                currentDownload.getRequestParams().getFile())
-                                                .replace("[hubName]",hubName),
-                                        null);
-
-                                String fileLocation = currentDownload.getFileLocation().replace(biocacheDownloadDir,
-                                        biocacheDownloadUrl);
-                                String body = messageSource.getMessage("offlineEmailBodyError",
-                                        new Object[] { fileLocation },
-                                        biocacheDownloadEmailBodyError.replace("[url]", fileLocation), null);
-
-                                // user email
-                                emailService.sendEmail(currentDownload.getEmail(), subject,
-                                        body + "\r\n\r\nuniqueId:" + currentDownload.getUniqueId() + " path:"
-                                                + currentDownload.getFileLocation().replace(biocacheDownloadDir, ""));
-                            } catch (Exception ex) {
-                                logger.error("Error sending error message to download email. "
-                                        + currentDownload.getFileLocation(), ex);
-                            }
-                        } finally {
-                            // in case of server up/down, only remove from queue
-                            // after emails are sent
-                            if (!shuttingDown && !doRetry) {
-                                unregisterDownload(currentDownload);
-                            }
-                        }
-                        return currentDownload;
-                    } finally {
-                        capacitySemaphore.release();
-                    }
-                }
-            };
+            return new OfflineDownloadCallable(currentDownload, executionDelay, capacitySemaphore, parallelExecutor);
         }
     }
 
@@ -1368,7 +1156,7 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
             public void run() {
                 boolean showErrorMessage = true;
                 try {
-                    Thread.sleep(5*60*1000);
+                    Thread.sleep(5 * 60 * 1000);
                     try {
                         FileUtils.deleteDirectory(new File(currentDownload.getFileLocation()).getParentFile());
                     } catch (IOException e) {
@@ -1382,7 +1170,7 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
                 } catch (InterruptedException e1) {
                     Thread.currentThread().interrupt();
                     logger.error("Interrupted while waiting to delete failed download: directory before retrying: " + new File(currentDownload.getFileLocation()).getParent() +
-                                ", " + e1.getMessage(), e1);
+                            ", " + e1.getMessage(), e1);
                 } finally {
                     if (showErrorMessage) {
                         logger.error("Did not successfully wait for retry download timeout: " + new File(currentDownload.getFileLocation()).getParent());
@@ -1390,5 +1178,202 @@ public class DownloadService implements ApplicationListener<ContextClosedEvent> 
                 }
             }
         };
+    }
+
+    class OfflineDownloadCallable implements Callable<DownloadDetailsDTO>, UserBalancedDownload {
+
+        DownloadDetailsDTO currentDownload;
+        long executionDelay;
+        Semaphore capacitySemaphore;
+        ExecutorService parallelExecutor;
+
+        public OfflineDownloadCallable(DownloadDetailsDTO currentDownload, long executionDelay, Semaphore capacitySemaphore, ExecutorService parallelExecutor) {
+            this.currentDownload = currentDownload;
+            this.executionDelay = executionDelay;
+            this.capacitySemaphore = capacitySemaphore;
+            this.parallelExecutor = parallelExecutor;
+        }
+
+        @Override
+        public DownloadDetailsDTO call() throws Exception {
+            try {
+                if (logger.isInfoEnabled()) {
+                    logger.info("Starting to download the offline request: " + currentDownload);
+                }
+                Thread.sleep(executionDelay);
+                // we are now ready to start the download
+                // we need to create an output stream to the file system
+
+                boolean shuttingDown = false;
+                boolean doRetry = false;
+
+                try (FileOutputStream fos = FileUtils
+                        .openOutputStream(new File(currentDownload.getFileLocation()));) {
+                    // cannot include misc columns if shp
+                    if (!currentDownload.getRequestParams().getFileType().equals("csv")
+                            && currentDownload.getRequestParams().getIncludeMisc()) {
+                        currentDownload.getRequestParams().setIncludeMisc(false);
+                    }
+
+                    List<CreateDoiResponse> doiResponseList = null;
+                    Boolean mintDoi = currentDownload.getRequestParams().getMintDoi();
+
+                    String doiFailureMessage = "";
+                    if (mintDoi) {
+                        doiResponseList = new ArrayList<>();
+                    }
+                    writeQueryToStream(currentDownload, new CloseShieldOutputStream(fos),
+                            currentDownload.getDownloadType() == DownloadType.RECORDS_INDEX, false, true, parallelExecutor, doiResponseList);
+
+                    if (mintDoi && doiResponseList.size() <= 0) {
+                        //DOI Minting failed
+                        doiFailureMessage = biocacheDownloadDoiFailureMessage;
+                        mintDoi = false; //Prevent any updates
+                    }
+
+                    // now that the download is complete email a link to the
+                    // recipient.
+                    final String hubName = currentDownload.getRequestParams().getHubName() != null ? currentDownload.getRequestParams().getHubName() : "ALA";
+                    String subject = messageSource.getMessage("offlineEmailSubject", null,
+                            biocacheDownloadEmailSubject.replace("[filename]",
+                                    currentDownload.getRequestParams().getFile())
+                                    .replace("[hubName]", hubName),
+                            null);
+
+                    if (currentDownload != null && currentDownload.getFileLocation() != null) {
+                        insertMiscHeader(currentDownload);
+
+                        //ensure new directories have correct permissions
+                        new File(currentDownload.getFileLocation()).getParentFile().setExecutable(true, false);
+                        new File(currentDownload.getFileLocation()).getParentFile().getParentFile().setExecutable(true, false);
+
+
+                        String archiveFileLocation = biocacheDownloadUrl + File.separator + URLEncoder.encode(currentDownload.getFileLocation().replace(biocacheDownloadDir + "/", ""), "UTF-8").replace("%2F", "/").replace("+", "%20");
+
+                        String doiStr = "";
+                        String emailBody;
+                        String emailTemplate;
+                        String downloadFileLocation;
+                        if (mintDoi && doiResponseList != null && !doiResponseList.isEmpty() && doiResponseList.get(0) != null) {
+
+                            CreateDoiResponse doiResponse;
+                            doiResponse = doiResponseList.get(0);
+                            try {
+                                doiService.updateFile(doiResponse.getUuid(), currentDownload.getFileLocation());
+                                doiStr = doiResponse.getDoi();
+                                emailTemplate = biocacheDownloadDoiEmailTemplate;
+
+                                // TODO: The downloads-plugin has issues with unencoded user queries
+                                // Working around that by hardcoding the official DOI resolution service as the landing page
+                                // https://github.com/AtlasOfLivingAustralia/biocache-service/issues/311
+                                //final String doiLandingPage = currentDownload.getRequestParams().getDoiDisplayUrl() != null ? currentDownload.getRequestParams().getDoiDisplayUrl() : biocacheDownloadDoiLandingPage;
+                                //downloadFileLocation = doiLandingPage + doiStr;
+                                downloadFileLocation = OFFICIAL_DOI_RESOLVER + doiStr;
+                            } catch (Exception ex) {
+                                logger.error("DOI update failed for DOI uuid " + doiResponse.getUuid() +
+                                        " and path " + currentDownload.getFileLocation(), ex);
+                                doiFailureMessage = biocacheDownloadDoiFailureMessage;
+                                emailTemplate = biocacheDownloadEmailTemplate;
+                                downloadFileLocation = archiveFileLocation;
+                            }
+                        } else {
+                            emailTemplate = biocacheDownloadEmailTemplate;
+                            downloadFileLocation = archiveFileLocation;
+                        }
+
+                        emailBody = Files.asCharSource(new File(emailTemplate), StandardCharsets.UTF_8).read();
+
+                        final String searchUrl = generateSearchUrl(currentDownload.getRequestParams());
+                        String emailBodyHtml = emailBody.replace("[url]", downloadFileLocation)
+                                .replace("[date]", currentDownload.getStartDateString())
+                                .replace("[searchUrl]", searchUrl)
+                                .replace("[queryTitle]", currentDownload.getRequestParams().getDisplayString())
+                                .replace("[doi]", doiStr)
+                                .replace("[doiFailureMessage]", doiFailureMessage);
+                        String body = messageSource.getMessage("offlineEmailBody",
+                                new Object[]{archiveFileLocation, searchUrl, currentDownload.getStartDateString()},
+                                emailBodyHtml, null);
+
+                        // save the statistics to the download directory
+                        try (FileOutputStream statsStream = FileUtils
+                                .openOutputStream(new File(new File(currentDownload.getFileLocation()).getParent()
+                                        + File.separator + "downloadStats.json"))) {
+                            objectMapper.writeValue(statsStream, currentDownload);
+                        }
+
+                        if (mintDoi && doiResponseList != null && !doiResponseList.isEmpty() && doiResponseList.get(0) != null) {
+                            // Delay sending the email to allow the DOI to propagate through to upstream DOI providers
+                            Thread.sleep(doiPropagationDelay);
+                        }
+                        emailService.sendEmail(currentDownload.getEmail(), subject, body);
+                    }
+
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    //shutting down
+                    shuttingDown = true;
+                    throw e;
+                } catch (CancellationException e) {
+                    //download cancelled, do not send an email
+                } catch (com.datastax.driver.core.exceptions.DriverException e) {
+                    logger.warn("Offline download failed. Cassandra driver error. Retrying in 5 mins. Task file: " + currentDownload.getFileLocation() + " : " + e.getMessage(), e);
+                    //return to queue in 5mins as long as the VM is not restarted during that time, in which case it could be permanently stuck in a broken state
+                    doRetry = true;
+                    newRetryThread(currentDownload).start();
+                } catch (PelopsException e) {
+                    logger.warn("Offline download failed. Cassandra error. Retrying in 5 mins. Task file: " + currentDownload.getFileLocation() + " : " + e.getMessage(), e);
+                    //return to queue in 5mins as long as the VM is not restarted during that time, in which case it could be permanently stuck in a broken state
+                    doRetry = true;
+                    newRetryThread(currentDownload).start();
+                } catch (Exception e) {
+                    logger.error("Error in offline download, sending email. download path: "
+                            + currentDownload.getFileLocation(), e);
+
+                    try {
+                        final String hubName = currentDownload.getRequestParams().getHubName() != null ? currentDownload.getRequestParams().getHubName() : "ALA";
+                        String subject = messageSource.getMessage("offlineEmailSubjectError", null,
+                                biocacheDownloadEmailSubjectError.replace("[filename]",
+                                        currentDownload.getRequestParams().getFile())
+                                        .replace("[hubName]", hubName),
+                                null);
+
+                        String fileLocation = currentDownload.getFileLocation().replace(biocacheDownloadDir,
+                                biocacheDownloadUrl);
+                        String body = messageSource.getMessage("offlineEmailBodyError",
+                                new Object[]{fileLocation},
+                                biocacheDownloadEmailBodyError.replace("[url]", fileLocation), null);
+
+                        // user email
+                        emailService.sendEmail(currentDownload.getEmail(), subject,
+                                body + "\r\n\r\nuniqueId:" + currentDownload.getUniqueId() + " path:"
+                                        + currentDownload.getFileLocation().replace(biocacheDownloadDir, ""));
+                    } catch (Exception ex) {
+                        logger.error("Error sending error message to download email. "
+                                + currentDownload.getFileLocation(), ex);
+                    }
+                } finally {
+                    // in case of server up/down, only remove from queue
+                    // after emails are sent
+                    if (!shuttingDown && !doRetry) {
+                        unregisterDownload(currentDownload);
+                    }
+                }
+                return currentDownload;
+            } finally {
+                capacitySemaphore.release();
+            }
+        }
+
+        @Override
+        public DownloadDetailsDTO getDetails() {
+            return currentDownload;
+        }
+    }
+
+    public static void incrementCount(ConcurrentMap<String, AtomicInteger> values, Object uid) {
+        if (uid != null) {
+            String nextKey = uid.toString();
+            values.computeIfAbsent(nextKey, k -> new AtomicInteger(0)).incrementAndGet();
+        }
     }
 }

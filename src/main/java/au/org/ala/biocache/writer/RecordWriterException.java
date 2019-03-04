@@ -38,18 +38,15 @@ public class RecordWriterException extends IOException {
     public RecordWriterException(String msg, Throwable cause) {
         super("RecordWriter Exception: " + msg, cause);
     }
-    
-    public static RecordWriterException newRecordWriterException(DownloadDetailsDTO dd, DownloadRequestParams downloadParams, boolean solr, RecordWriterError writer) {
+
+    public static RecordWriterException newRecordWriterException(DownloadDetailsDTO downloadDetails, boolean solr, RecordWriterError writer) {
+        DownloadRequestParams downloadParams = downloadDetails.getRequestParams();
         String msg = "";
-        if (dd != null) {
-            if (dd.getFileLocation() != null) {
-                msg += "Offline request: " + dd.getFileLocation();
-                logger.error("msg");
-            } else {
-                msg += "Online " + (solr?"SOLR":"Cassandra") + " download request: " + downloadParams.toString() + ", " + dd.getIpAddress();
-            }
-        } else if (downloadParams != null) {
-            msg += "Online " + (solr?"SOLR":"Cassandra") + "  download request: " + downloadParams.toString();
+        if (downloadDetails.getFileLocation() != null) {
+            msg += "Offline request: " + downloadDetails.getFileLocation();
+            logger.error("msg");
+        } else {
+            msg += "Online " + (solr ? "SOLR" : "Cassandra") + " download request: " + downloadParams.toString() + ", " + downloadDetails.getIpAddress();
         }
         return new RecordWriterException(msg, writer == null || writer.getErrors().isEmpty() ? null : writer.getErrors().get(0));
     }

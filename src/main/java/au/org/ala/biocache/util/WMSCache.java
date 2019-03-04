@@ -138,7 +138,7 @@ public class WMSCache {
      * @param pointType
      * @return cache key as String
      */
-    public String getKey(String query, String colourmode, PointType pointType) {
+    public static String getKey(String query, String colourmode, PointType pointType) {
         return query + "|" + colourmode + "|" + pointType.getLabel();
     }
 

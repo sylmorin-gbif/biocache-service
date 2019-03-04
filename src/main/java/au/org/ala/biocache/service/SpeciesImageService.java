@@ -15,18 +15,22 @@
 package au.org.ala.biocache.service;
 
 import au.org.ala.biocache.dao.SearchDAO;
-import au.org.ala.biocache.dto.*;
+import au.org.ala.biocache.dao.SearchDAOImpl;
+import au.org.ala.biocache.dto.SpeciesImageDTO;
+import au.org.ala.biocache.dto.SpeciesImagesDTO;
+import au.org.ala.biocache.util.SearchUtils;
 import com.fasterxml.jackson.core.type.TypeReference;
 import org.apache.log4j.Logger;
+import org.apache.solr.client.solrj.SolrQuery;
+import org.apache.solr.client.solrj.response.QueryResponse;
+import org.apache.solr.common.util.SimpleOrderedMap;
+import org.springframework.aop.framework.Advised;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.inject.Inject;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * cache of lft with the first found image info; data_resource_uid, image_url and number found.
@@ -60,31 +64,28 @@ public class SpeciesImageService {
                 long startTime = System.currentTimeMillis();
                 logger.debug("start refresh");
 
-                //lft counts for the query
-                SpatialSearchRequestParams params = new SpatialSearchRequestParams();
-                params.setPageSize(1);
-                params.setFacet(true);
-                params.setFacets(new String[]{"lft"});
-                params.setFlimit(99999999);
-                params.setFl("data_resource_uid,image_url");
-                params.setQ("image_url:*");
+                //lft counts and one data_resource_uid and one image_url for each
+                SolrQuery query = new SolrQuery();
+                query.setFacet(false);
+                query.setRows(0);
 
-                List<GroupFacetResultDTO> qr = searchDAO.searchGroupedFacets(params);
+                // count unique pointTypes
+                query.add("json.facet", "{lft: {type: terms, limit: -1, field: lft, sort: index, " +
+                        "facet:{" +
+                        "dr: {type: terms, limit: 1, field: data_resource_uid, sort: index}, " +
+                        "img:{type: terms, limit: 1, field: image_url, sort: index}}}}");
+                QueryResponse qr = ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).query(query, null);
 
-                //get lft and count
-                Map<Long, SpeciesImageDTO> map = new HashMap<Long, SpeciesImageDTO>();
-                for (GroupFacetResultDTO fr : qr) {
-                    for (GroupFieldResultDTO r : fr.getFieldResult()) {
-                        SpeciesImageDTO image = null;
-                        if (r.getOccurrences().size() > 0) {
-                            image = new SpeciesImageDTO(r.getOccurrences().get(0).getDataResourceUid(), r.getOccurrences().get(0).getImage());
-                        }
-                        //number of occurrences with at least one image
-                        image.setCount(r.getCount());
-                        try {
-                            map.put(Long.parseLong(r.getLabel()), image);
-                        } catch (Exception e) {
-                        }
+                Map<Long, SpeciesImageDTO> map = new HashMap();
+
+                for (SimpleOrderedMap item : SearchUtils.getList(qr.getResponse(), "facets", "lft", "buckets")) {
+                    String dataResourceUid = (String) SearchUtils.getVal(item, "dr", "buckets", 0, 0);
+                    String imageUrl = (String) SearchUtils.getVal(item, "dr", "buckets", 0, 0);
+                    SpeciesImageDTO image = new SpeciesImageDTO(dataResourceUid, imageUrl);
+                    image.setCount((Long) item.getVal(1));
+                    try {
+                        map.put((Long) item.getVal(0), image);
+                    } catch (Exception e) {
                     }
                 }
 
@@ -94,7 +95,7 @@ public class SpeciesImageService {
                 for (int i = 0; i < left.length; i++) {
                     left[i] = keys.get(i);
                 }
-                java.util.Arrays.sort(left);
+                Arrays.sort(left);
 
                 //get sorted values
                 SpeciesImageDTO[] leftImages = new SpeciesImageDTO[map.size()];

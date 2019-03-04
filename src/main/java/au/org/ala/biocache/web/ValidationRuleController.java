@@ -171,6 +171,7 @@ public class ValidationRuleController extends AbstractSecureController {
                             ssr.setQ(query);
                             ssr.setWkt(validationRuleDTO.getArea());
                             ssr.setFacet(false);
+                            ssr.setPageSize(0);
                             try {
                                 SolrDocumentList list = searchDAO.findByFulltext(ssr);
                                 Long recordCount = list.getNumFound();

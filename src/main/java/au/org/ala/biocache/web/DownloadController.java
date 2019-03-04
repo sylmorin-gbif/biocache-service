@@ -157,7 +157,7 @@ public class DownloadController extends AbstractSecureController {
                 Set<IndexFieldDTO> indexedFields = searchDAO.getIndexedFields();
                 for (String column : fields.split(",")) {
                     for (IndexFieldDTO field : indexedFields) {
-                        if (!field.isStored() && field.getDownloadName() != null && field.getDownloadName().equals(column)) {
+                        if ((!field.isStored() || !field.isDocvalue()) && field.getDownloadName() != null && field.getDownloadName().equals(column)) {
                             hasDBColumn = true;
                             break;
                         }
@@ -196,45 +196,47 @@ public class DownloadController extends AbstractSecureController {
             sensitiveFq = getSensitiveFq(request);
         }
 
-        ip = ip == null ? request.getRemoteAddr() : ip;
+        ip = ip == null ? getIPAddress(request) : ip;
 
         //create a new task
-        DownloadDetailsDTO dd = new DownloadDetailsDTO(requestParams, ip, downloadType);
-        dd.setIncludeSensitive(includeSensitive);
-        dd.setSensitiveFq(sensitiveFq);
+        DownloadDetailsDTO downloadDetails = new DownloadDetailsDTO(requestParams, ip, downloadType);
+        downloadDetails.setIncludeSensitive(includeSensitive);
+        downloadDetails.setSensitiveFq(sensitiveFq);
+        // all offline downloads use this function
+        downloadDetails.setOfflineRequest(true);
 
         //get query (max) count for queue priority
         requestParams.setPageSize(0);
         requestParams.setFacet(false);
         SolrDocumentList result = searchDAO.findByFulltext(requestParams);
-        dd.setTotalRecords(result.getNumFound());
+        downloadDetails.setTotalRecords(result.getNumFound());
 
         Map<String, Object> status = new LinkedHashMap<>();
-        DownloadDetailsDTO d = persistentQueueDAO.isInQueue(dd);
+        DownloadDetailsDTO existingDownloadDetails = persistentQueueDAO.isInQueue(downloadDetails);
 
-        if (d != null) {
+        if (existingDownloadDetails != null) {
             status.put("message", "Already in queue.");
             status.put("status", "inQueue");
             status.put("queueSize", persistentQueueDAO.getTotalDownloads());
-            status.put("statusUrl", downloadService.webservicesRoot + "/occurrences/offline/status/" + dd.getUniqueId());
-        } else if (dd.getTotalRecords() > downloadService.dowloadOfflineMaxSize) {
+            status.put("statusUrl", downloadService.webservicesRoot + "/occurrences/offline/status/" + existingDownloadDetails.getUniqueId());
+        } else if (downloadDetails.getTotalRecords() > downloadService.dowloadOfflineMaxSize) {
             //identify this download as too large
-            File file = new File(downloadService.biocacheDownloadDir + File.separator + UUID.nameUUIDFromBytes(dd.getEmail().getBytes(StandardCharsets.UTF_8)) + File.separator + dd.getStartTime() + File.separator + "tooLarge");
+            File file = new File(downloadService.biocacheDownloadDir + File.separator + UUID.nameUUIDFromBytes(downloadDetails.getEmail().getBytes(StandardCharsets.UTF_8)) + File.separator + downloadDetails.getStartTime() + File.separator + "tooLarge");
             FileUtils.forceMkdir(file.getParentFile());
             FileUtils.writeStringToFile(file, "", "UTF-8");
             status.put("downloadUrl", downloadService.biocacheDownloadUrl);
             status.put("status", "skipped");
             status.put("message", downloadService.downloadOfflineMsg);
-            status.put("error", "Requested to many records (" + dd.getTotalRecords() + "). The maximum is (" + downloadService.dowloadOfflineMaxSize + ")");
+            status.put("error", "Requested to many records (" + downloadDetails.getTotalRecords() + "). The maximum is (" + downloadService.dowloadOfflineMaxSize + ")");
         } else {
-            persistentQueueDAO.addDownloadToQueue(dd);
+            persistentQueueDAO.addDownloadToQueue(downloadDetails);
             status.put("status", "inQueue");
             status.put("queueSize", persistentQueueDAO.getTotalDownloads());
-            status.put("statusUrl", downloadService.webservicesRoot + "/occurrences/offline/status/" + dd.getUniqueId());
+            status.put("statusUrl", downloadService.webservicesRoot + "/occurrences/offline/status/" + downloadDetails.getUniqueId());
         }
 
-        status.put("searchUrl", downloadService.generateSearchUrl(dd.getRequestParams()));
-        writeStatusFile(dd.getUniqueId(), status);
+        status.put("searchUrl", downloadService.generateSearchUrl(downloadDetails.getRequestParams()));
+        writeStatusFile(downloadDetails.getUniqueId(), status);
 
         return status;
     }
@@ -437,5 +439,18 @@ public class DownloadController extends AbstractSecureController {
             }
             return downloadService.getSensitiveFq(xAlaUserIdHeader);
         }
+    }
+
+    /**
+     * Returns the IP address for the supplied request. It will look for the existence of
+     * an X-Forwarded-For Header before extracting it from the request.
+     *
+     * @param request
+     * @return IP Address of the request
+     */
+    private String getIPAddress(HttpServletRequest request) {
+        //check to see if proxied.
+        String forwardedFor = request.getHeader("X-Forwarded-For");
+        return forwardedFor == null ? request.getRemoteAddr() : forwardedFor;
     }
 }

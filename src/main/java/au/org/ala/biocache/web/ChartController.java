@@ -15,7 +15,9 @@
 package au.org.ala.biocache.web;
 
 import au.org.ala.biocache.dao.SearchDAO;
+import au.org.ala.biocache.dao.SearchDAOImpl;
 import au.org.ala.biocache.dto.*;
+import au.org.ala.biocache.stream.ChartFacet;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
 import net.sf.ehcache.CacheManager;
@@ -24,6 +26,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Logger;
 import org.apache.solr.client.solrj.response.FieldStatsInfo;
 import org.apache.solr.common.util.NamedList;
+import org.springframework.aop.framework.Advised;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Controller;
@@ -35,7 +38,6 @@ import org.springframework.web.bind.annotation.ResponseBody;
 import javax.annotation.Resource;
 import javax.inject.Inject;
 import javax.servlet.ServletContext;
-import javax.servlet.http.HttpServletResponse;
 import java.io.Serializable;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
@@ -54,7 +56,7 @@ public class ChartController extends AbstractSecureController implements Seriali
      * Fulltext search DAO
      */
     @Inject
-    protected SearchDAO searchDAO;
+    protected SearchDAO searchDao;
 
     @Autowired
     private ServletContext servletContext;
@@ -97,7 +99,6 @@ public class ChartController extends AbstractSecureController implements Seriali
      * @param x
      * @param xranges
      * @param stats
-     * @param response
      * @return
      * @throws Exception
      */
@@ -111,6 +112,8 @@ public class ChartController extends AbstractSecureController implements Seriali
               @RequestParam(value = "x", required = false) String x,
               @RequestParam(value = "xranges", required = false) String xranges,
               @RequestParam(value = "stats", required = false) String stats,
+              // default stats value is only for backwards compatability
+              @RequestParam(value = "statType", required = false, defaultValue = "min,max,mean,missing,stddev,count,sum") String statType,
               @RequestParam(value = "series", required = false) String series,
               @RequestParam(value = "seriesranges", required = false) String seriesranges,
               @RequestParam(value = "seriesother", required = false, defaultValue = "false") Boolean seriesother,
@@ -119,6 +122,7 @@ public class ChartController extends AbstractSecureController implements Seriali
               @RequestParam(value = "xmissing", required = false, defaultValue = "true") Boolean xmissing,
               @RequestParam(value = "fsort", required = false, defaultValue = "index") String fsort) throws Exception {
 
+        List<String> statTypes = Arrays.asList(statType.split(","));
         //construct series subqueries
         List<Map> seriesFqs = produceSeriesFqs(searchParams, x, series, seriesranges, seriesother, seriesmissing);
 
@@ -149,18 +153,12 @@ public class ChartController extends AbstractSecureController implements Seriali
                 searchParams.setFlimit(maxStringFacets);
                 searchParams.setFsort(fsort);
                 searchParams.setFacets(new String[]{x});
+                searchParams.setPageSize(0);
 
                 if (xRanges.length() > 0) appendFq(searchParams, xRanges.toString());
 
-                Collection<FacetResultDTO> l = searchDAO.findByFulltextSpatialQuery(searchParams, null).getFacetResults();
-                if (l.size() > 0) {
-                    data = l.iterator().next().getFieldResult();
-                    if (!xmissing) {
-                        for (int i = data.size() - 1; i >= 0; i--) {
-                            if (StringUtils.isEmpty(((FieldResultDTO) data.get(i)).getLabel())) data.remove(i);
-                        }
-                    }
-                }
+                ChartFacet procFacet = new ChartFacet(data, xmissing, x, searchDao);
+                ((SearchDAOImpl) ((Advised) searchDao).getTargetSource().getTarget()).streamingQuery(searchParams, null, null, procFacet);
 
                 if (inverseXranges.length() > 0) {
                     searchParams.setFq(fqBackup);
@@ -168,7 +166,7 @@ public class ChartController extends AbstractSecureController implements Seriali
 
                     searchParams.setFacet(false);
                     appendFq(searchParams, inverseXranges.toString());
-                    SearchResultDTO sr = searchDAO.findByFulltextSpatialQuery(searchParams, null);
+                    SearchResultDTO sr = searchDao.findByFulltextSpatialQuery(searchParams, null);
                     if (sr != null) {
                         data.add(new FieldResultDTO("Other", "Other", sr.getTotalRecords()));
                     }
@@ -176,7 +174,7 @@ public class ChartController extends AbstractSecureController implements Seriali
             } else if (xranges == null && stats != null) {
                 //2. mean/max/min/quartile of field2, bar/pie/line chart of field1
                 if (xRanges.length() > 0) appendFq(searchParams, xRanges.toString());
-                data = searchDAO.searchStat(searchParams, stats, x);
+                data = searchDao.searchStat(searchParams, stats, x, statTypes);
                 if (!xmissing) {
                     for (int i = data.size() - 1; i >= 0; i--) {
                         if (StringUtils.isEmpty(((FieldStatsItem) data.get(i)).getLabel())) data.remove(i);
@@ -189,7 +187,7 @@ public class ChartController extends AbstractSecureController implements Seriali
 
                     searchParams.setFacet(false);
                     appendFq(searchParams, inverseXranges.toString());
-                    List d = searchDAO.searchStat(searchParams, stats, null);
+                    List d = searchDao.searchStat(searchParams, stats, null, statTypes);
                     if (d != null && d.size() > 0) {
                         ((FieldStatsItem) d.get(0)).setLabel("Other");
                         data.add(d.get(0));
@@ -212,7 +210,7 @@ public class ChartController extends AbstractSecureController implements Seriali
                     xrangesFqs[fqBackup2.length] = m.get("fq").toString();
                     searchParams.setFq(xrangesFqs);
 
-                    SearchResultDTO l = searchDAO.findByFulltextSpatialQuery(searchParams, null);
+                    SearchResultDTO l = searchDao.findByFulltextSpatialQuery(searchParams, null);
                     if (l != null) {
                         String label = m.get("label").toString();
                         FieldResultDTO fr = new FieldResultDTO(label, label, l.getTotalRecords(), m.get("fq").toString());
@@ -238,7 +236,7 @@ public class ChartController extends AbstractSecureController implements Seriali
                         fqs[fqs.length - 1] = m.get("fq").toString();
                         searchParams.setFq(fqs);
 
-                        List result = searchDAO.searchStat(searchParams, stats, null);
+                        List result = searchDao.searchStat(searchParams, stats, null, statTypes);
                         if (result.size() > 0) {
                             ((FieldStatsItem) result.iterator().next()).setFq(fqs[fqs.length - 1]);
                             ((FieldStatsItem) result.iterator().next()).setLabel(m.get("label").toString());
@@ -405,7 +403,7 @@ public class ChartController extends AbstractSecureController implements Seriali
 
     private boolean isNumber(String field) throws Exception {
         String[] numberType = new String[]{"int", "tint", "double", "tdouble", "long", "tlong", "float", "tfloat"};
-        for (IndexFieldDTO f : searchDAO.getIndexedFields()) {
+        for (IndexFieldDTO f : searchDao.getIndexedFields()) {
             if (f.getName().equalsIgnoreCase(field) && ArrayUtils.contains(numberType, f.getDataType())) return true;
         }
         return false;
@@ -413,7 +411,7 @@ public class ChartController extends AbstractSecureController implements Seriali
 
     private boolean isDecimal(String field) throws Exception {
         String[] numberType = new String[]{"double", "tdouble", "float", "tfloat"};
-        for (IndexFieldDTO f : searchDAO.getIndexedFields()) {
+        for (IndexFieldDTO f : searchDao.getIndexedFields()) {
             if (f.getName().equalsIgnoreCase(field) && ArrayUtils.contains(numberType, f.getDataType())) {
                 return true;
             }
@@ -422,14 +420,14 @@ public class ChartController extends AbstractSecureController implements Seriali
     }
 
     private boolean isDate(String field) throws Exception {
-        for (IndexFieldDTO f : searchDAO.getIndexedFields()) {
+        for (IndexFieldDTO f : searchDao.getIndexedFields()) {
             if (f.getName().equalsIgnoreCase(field) && f.getDataType().equalsIgnoreCase("tdate")) return true;
         }
         return false;
     }
 
     private String getFieldDescription(String field) throws Exception {
-        for (IndexFieldDTO f : searchDAO.getIndexedFields()) {
+        for (IndexFieldDTO f : searchDao.getIndexedFields()) {
             if (f.getName().equalsIgnoreCase(field) && f.getDescription() != null) return f.getDescription();
         }
         return field;
@@ -441,17 +439,18 @@ public class ChartController extends AbstractSecureController implements Seriali
         searchParams.setFacet(true);
         searchParams.setFlimit(_maxFacets);
         searchParams.setFacets(new String[]{series});
+        searchParams.setPageSize(0);
 
         if (!isDate(series) && !isNumber(series)) searchParams.setFsort("count");
 
-        Collection<FacetResultDTO> l = searchDAO.findByFulltextSpatialQuery(searchParams, null).getFacetResults();
-        if (l.size() > 0) {
-            for (FieldResultDTO f : l.iterator().next().getFieldResult()) {
-                if (!includeMissing && StringUtils.isEmpty(f.getLabel())) continue;
-
+        List<FieldResultDTO> data = new ArrayList();
+        ChartFacet procFacet = new ChartFacet(data, includeMissing, series, searchDao);
+        ((SearchDAOImpl) ((Advised) searchDao).getTargetSource().getTarget()).streamingQuery(searchParams, null, null, procFacet);
+        if (data.size() > 0) {
+            for (FieldResultDTO t : data) {
                 Map sm = new HashMap();
-                sm.put("fq", f.getFq());
-                sm.put("label", f.getLabel());
+                sm.put("fq", t.getFq());
+                sm.put("label", t.getLabel());
                 seriesFqs.add(sm);
             }
         }
@@ -469,7 +468,7 @@ public class ChartController extends AbstractSecureController implements Seriali
             List list = getSeriesFacets(series, searchParams, maxSeries + 1, includeMissing);
             if (list.size() > maxSeries + (includeMissing ? 1 : 0)) {
                 //get min/max
-                List minMax = (List) chart(searchParams, null, null, series, null, null, false, false, false, false, "count").get("data");
+                List minMax = (List) chart(searchParams, null, null, series, "max,min", null, null, false, false, false, false, "count").get("data");
                 if (date) {
                     Long min = ((Date) ((FieldStatsItem) ((List) ((Map) minMax.get(0)).get("data")).get(0)).getMin()).getTime();
                     Long max = ((Date) ((FieldStatsItem) ((List) ((Map) minMax.get(0)).get("data")).get(0)).getMax()).getTime();

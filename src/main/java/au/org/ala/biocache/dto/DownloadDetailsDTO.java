@@ -49,6 +49,7 @@ public class DownloadDetailsDTO {
     private String sensitiveFq = null;
     private AtomicBoolean interrupt = new AtomicBoolean(false);
     private String processingThreadName = null;
+    private Boolean isOfflineRequest = false;
 
     /**
      * Default constructor necessary for Jackson to create an object from the JSON. 
@@ -270,6 +271,14 @@ public class DownloadDetailsDTO {
     public void resetCounts() {
         recordsDownloaded.set(0);
         lastUpdate = new Date();
+    }
+
+    public Boolean getOfflineRequest() {
+        return isOfflineRequest;
+    }
+
+    public void setOfflineRequest(Boolean offlineRequest) {
+        isOfflineRequest = offlineRequest;
     }
 
     /**

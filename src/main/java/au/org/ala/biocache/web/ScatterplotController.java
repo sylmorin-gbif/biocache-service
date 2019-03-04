@@ -1,8 +1,10 @@
 package au.org.ala.biocache.web;
 
 import au.org.ala.biocache.dao.SearchDAO;
+import au.org.ala.biocache.dao.SearchDAOImpl;
 import au.org.ala.biocache.dto.IndexFieldDTO;
 import au.org.ala.biocache.dto.SpatialSearchRequestParams;
+import au.org.ala.biocache.stream.ScatterplotSearch;
 import org.apache.log4j.Logger;
 import org.apache.solr.common.SolrDocumentList;
 import org.jfree.chart.ChartFactory;
@@ -14,6 +16,7 @@ import org.jfree.chart.plot.PlotOrientation;
 import org.jfree.chart.plot.XYPlot;
 import org.jfree.data.xy.DefaultXYDataset;
 import org.jfree.ui.RectangleEdge;
+import org.springframework.aop.framework.Advised;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
@@ -26,6 +29,7 @@ import java.awt.geom.Ellipse2D;
 import java.awt.image.BufferedImage;
 import java.util.*;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * This controller is responsible for providing basic scatterplot services.
@@ -132,7 +136,7 @@ public class ScatterplotController {
         fqs_new[fqs_old.length] = x + ":[" + x1 + " TO " + x2 + "]";
         fqs_new[fqs_old.length + 1] = y + ":[" + y1 + " TO " + y2 + "]";
         requestParams.setFq(fqs_new);
-        return searchDAO.findByFulltextSpatialQuery(requestParams, null);
+        return searchDao.findByFulltextSpatialQuery(requestParams, null);
         */
     }
 
@@ -150,9 +154,8 @@ public class ScatterplotController {
             if(xField.getName().equals(x)) {
                 if (!validDatatypes.contains(xField.getDataType() )) {
                     toThrowX = new Exception("Invalid datatype: " + xField.getDataType() + " for x: " + x, toThrowX);
-                }
-                else if (!xField.isStored()) {
-                    toThrowX = new Exception("Cannot use x: " + x + ".  It is not a stored field.", toThrowX);
+                } else if (!xField.isDocvalue()) {
+                    toThrowX = new Exception("Cannot use x: " + x + ".  It is not a docvalue field.", toThrowX);
                 }
                 else {
                     displayNameX = xField.getDescription();
@@ -171,9 +174,8 @@ public class ScatterplotController {
             if(yField.getName().equals(y)) {
                 if (!validDatatypes.contains(yField.getDataType() )) {
                     toThrowY = new Exception("Invalid datatype: " + yField.getDataType() + " for y: " + y, toThrowY);
-                }
-                else if(!yField.isStored()) {
-                    toThrowY = new Exception("Cannot use y: " + y + ".  It is not a stored field.", toThrowY);
+                } else if (!yField.isDocvalue()) {
+                    toThrowY = new Exception("Cannot use y: " + y + ".  It is not a docvalue field.", toThrowY);
                 }
                 else {
                     displayNameY = yField.getDescription();
@@ -186,38 +188,35 @@ public class ScatterplotController {
             throw new Exception("Unknown, unsupported datatype, or not stored, value for y: " + y, toThrowY);
         }
 
-        //get data
+        long start = System.currentTimeMillis();
+        requestParams.setPageSize(0);
+        requestParams.setFacet(false);
+        SolrDocumentList sdl = searchDAO.findByFulltext(requestParams);
+        int size = (int) sdl.getNumFound();
+
         requestParams.setPageSize(PAGE_SIZE);
         requestParams.setFl(x + "," + y);
-        SolrDocumentList sdl = searchDAO.findByFulltext(requestParams);
-        int size = sdl.size();
+        requestParams.setSort(x);
+        requestParams.setDir("asc");
+
         double [][] data = new double[2][size];
-        int count = 0;
-        for(int i=0;i<size;i++) {
-            try {
-                Object a = sdl.get(i).getFieldValue(y);
-                Object b = sdl.get(i).getFieldValue(x);
-                data[1][i] = Double.parseDouble(String.valueOf(sdl.get(i).getFieldValue(y)));
-                if(a instanceof Double) {
-                    data[0][i] = (Double) a;
-                } else {
-                    data[0][i] = Double.parseDouble(String.valueOf(a));
-                }
+        AtomicInteger count = new AtomicInteger(0); // need to get the return value
+        ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).streamingQuery(requestParams, null, new ScatterplotSearch(data, x, y, count), null);
 
-                if(b instanceof Double) {
-                    data[1][i] = (Double) b;
-                } else {
-                    data[1][i] = Double.parseDouble(String.valueOf(b));
-                }
+        // resize data
+        double[] a = data[0];
+        double[] b = data[1];
 
-                count++;
-            } catch (Exception e) {
-                data[0][i] = Double.NaN;
-                data[1][i] = Double.NaN;
-            }
-        }
+        data[0] = new double[count.intValue()];
+        data[1] = new double[count.intValue()];
 
-        if(count == 0) {
+        System.arraycopy(a, 0, data[0], 0, count.intValue());
+        System.arraycopy(b, 0, data[1], 0, count.intValue());
+
+        long end = System.currentTimeMillis();
+        System.out.println((end - start) + "ms");
+
+        if (count.intValue() == 0) {
             throw new Exception("valid records found for these input parameters");
         }
 
@@ -228,8 +227,8 @@ public class ScatterplotController {
         //create chart
         JFreeChart jChart = ChartFactory.createScatterPlot(
                 title.equals(" ")?requestParams.getDisplayString():title //chart display name
-                , displayNameX //x-axis display name
-                , displayNameY //y-axis display name
+                , displayNameY //x-axis display name
+                , displayNameX //y-axis display name
                 , xyDataset
                 , PlotOrientation.HORIZONTAL, false, false, false);
         jChart.setBackgroundPaint(Color.white);

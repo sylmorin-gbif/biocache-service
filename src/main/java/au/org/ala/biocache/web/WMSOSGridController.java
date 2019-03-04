@@ -3,7 +3,6 @@ package au.org.ala.biocache.web;
 import au.org.ala.biocache.dao.SearchDAO;
 import au.org.ala.biocache.dto.*;
 import au.org.ala.biocache.util.*;
-import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Logger;
 import org.geotools.geometry.GeneralDirectPosition;
@@ -109,8 +108,18 @@ public class WMSOSGridController {
                 requestParams.setQc(null);
             }
 
-            String lat = request.getParameter("lat");
-            String lng = request.getParameter("lng") != null ? request.getParameter("lng") : request.getParameter("lon");
+            // ignore parameter case
+            String latName = "lat";
+            String lngName = "lng";
+            Enumeration<String> names = request.getParameterNames();
+            while (names.hasMoreElements()) {
+                String name = names.nextElement();
+                if ("lat".equalsIgnoreCase(name)) latName = name;
+                if ("lng".equalsIgnoreCase(name) || "lon".equalsIgnoreCase(name)) lngName = name;
+            }
+
+            String lat = request.getParameter(latName);
+            String lng = request.getParameter(lngName);
 
             //determine the zoom level
             double[] eastingNorthing = convertWGS84ToEastingNorthing(
@@ -281,37 +290,29 @@ public class WMSOSGridController {
     @RequestMapping(value = {"/osgrid/wms/reflect"}, method = RequestMethod.GET)
     public void generateWmsTile(
             SpatialSearchRequestParams requestParams,
-            @RequestParam(value = "CQL_FILTER", required = false, defaultValue = "") String cql_filter,
-            @RequestParam(value = "ENV", required = true, defaultValue = "") String env,
-            @RequestParam(value = "SRS", required = false, defaultValue = "EPSG:900913") String srs, //default to google mercator
-            @RequestParam(value = "STYLES", required = false, defaultValue = "") String styles,
-            @RequestParam(value = "BBOX", required = true, defaultValue = "") String bboxString,
-            @RequestParam(value = "LAYERS", required = false, defaultValue = "") String layers,
-            @RequestParam(value = "WIDTH", required = true, defaultValue = "256") Integer width,
-            @RequestParam(value = "HEIGHT", required = true, defaultValue = "256") Integer height,
-            @RequestParam(value = "OUTLINE", required = true, defaultValue = "true") boolean outlineGrids,
-            @RequestParam(value = "OUTLINECOLOUR", required = true, defaultValue = "0xff000000") String outlineColour,
+            GetMap getMap,
             HttpServletRequest request,
             HttpServletResponse response)
             throws Exception {
 
-        srs = srs.split(",")[0];
+        getMap.setSrs(getMap.getSrs().split(",")[0]);
 
-        WmsEnv wmsEnv = new WmsEnv(env, styles);
+        WmsEnv wmsEnv = new WmsEnv(getMap.getEnv(), getMap.getStyles());
 
-        if(StringUtils.isEmpty(bboxString)){
+        if (StringUtils.isEmpty(getMap.getBbox())) {
             return;
         }
 
         //CQL Filter takes precedence of the layer
-        if (org.apache.commons.lang.StringUtils.trimToNull(cql_filter) != null) {
-            requestParams.setQ(wmsUtils.getQ(cql_filter));
-        } else if (org.apache.commons.lang.StringUtils.trimToNull(layers) != null && !"ALA:Occurrences".equalsIgnoreCase(layers)) {
-            requestParams.setQ(wmsUtils.convertLayersParamToQ(layers));
+        if (org.apache.commons.lang.StringUtils.trimToNull(getMap.getCqlFilter()) != null) {
+            requestParams.setQ(wmsUtils.getQ(getMap.getCqlFilter()));
+        } else if (org.apache.commons.lang.StringUtils.trimToNull(getMap.getLayers()) != null
+                && !"ALA:Occurrences".equalsIgnoreCase(getMap.getLayers())) {
+            requestParams.setQ(wmsUtils.convertLayersParamToQ(getMap.getLayers()));
         }
 
         //get the requested extent for this tile
-        String[] bbox = bboxString.split(",");
+        String[] bbox = getMap.getBbox().split(",");
         double minx = Double.parseDouble(bbox[0]);
         double miny = Double.parseDouble(bbox[1]);
         double maxx = Double.parseDouble(bbox[2]);
@@ -361,12 +362,12 @@ public class WMSOSGridController {
             }
         }
 
-        double oneUnitInRequestedProjXInPixels = (double) width / (double)(maxx - minx);
-        double oneUnitInRequestedProjYInPixels = (double) height / (double)(maxy - miny);
+        double oneUnitInRequestedProjXInPixels = (double) getMap.getWidth() / (double) (maxx - minx);
+        double oneUnitInRequestedProjYInPixels = (double) getMap.getHeight() / (double) (maxy - miny);
 
         //get a bounding box in WGS84 decimal latitude/longitude
-        double[] minLatLng = convertProjectionToWGS84(minx, miny, srs);
-        double[] maxLatLng = convertProjectionToWGS84(maxx, maxy, srs);
+        double[] minLatLng = convertProjectionToWGS84(minx, miny, getMap.getSrs());
+        double[] maxLatLng = convertProjectionToWGS84(maxx, maxy, getMap.getSrs());
 
         String bboxFilterQuery = "(longitude:[{0} TO {2}] AND latitude:[{1} TO {3}])";
 
@@ -404,7 +405,7 @@ public class WMSOSGridController {
         requestParams.setFlimit(-1);
         requestParams.setFacets(facets);
 
-        WMSImg wmsImg = WMSImg.create(width, height);
+        WMSImg wmsImg = WMSImg.create(getMap.getWidth(), getMap.getHeight());
 
         requestParams.setFq(newFqs);
         requestParams.setPageSize(0);
@@ -445,9 +446,9 @@ public class WMSOSGridController {
                     miny,
                     oneUnitInRequestedProjXInPixels,
                     oneUnitInRequestedProjYInPixels,
-                    srs,
-                    width,
-                    height,
+                    getMap.getSrs(),
+                    getMap.getWidth(),
+                    getMap.getHeight(),
                     wmsEnv,
                     renderedLinesCache
             );
@@ -455,9 +456,9 @@ public class WMSOSGridController {
             linesToRender.addAll(renderedLines);
         }
 
-        if(outlineGrids) {
+        if (getMap.isOutline()) {
             //grid lines are rendered after cell fills
-            renderGridLines(wmsImg, linesToRender, outlineColour);
+            renderGridLines(wmsImg, linesToRender, getMap.getOutlineColour());
         }
         
         if (wmsImg != null && wmsImg.g != null) {

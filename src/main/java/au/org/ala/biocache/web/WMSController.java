@@ -16,18 +16,23 @@ package au.org.ala.biocache.web;
 
 import au.org.ala.biocache.dao.QidCacheDAO;
 import au.org.ala.biocache.dao.SearchDAO;
+import au.org.ala.biocache.dao.SearchDAOImpl;
 import au.org.ala.biocache.dao.TaxonDAO;
 import au.org.ala.biocache.dto.*;
 import au.org.ala.biocache.model.Qid;
+import au.org.ala.biocache.stream.DrawHighlight;
+import au.org.ala.biocache.stream.StreamAsCSV;
 import au.org.ala.biocache.util.*;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.collections.map.LRUMap;
 import org.apache.commons.lang.StringUtils;
 import org.apache.log4j.Logger;
-import org.apache.solr.client.solrj.response.FacetField;
+import org.apache.solr.client.solrj.SolrQuery;
+import org.apache.solr.client.solrj.response.QueryResponse;
 import org.apache.solr.common.SolrDocument;
 import org.apache.solr.common.SolrDocumentList;
+import org.apache.solr.common.util.SimpleOrderedMap;
 import org.geotools.geometry.GeneralDirectPosition;
 import org.geotools.referencing.CRS;
 import org.geotools.referencing.operation.DefaultCoordinateOperationFactory;
@@ -37,6 +42,7 @@ import org.opengis.referencing.crs.CRSAuthorityFactory;
 import org.opengis.referencing.crs.CoordinateReferenceSystem;
 import org.opengis.referencing.operation.CoordinateOperation;
 import org.opengis.referencing.operation.TransformException;
+import org.springframework.aop.framework.Advised;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.ehcache.EhCacheManagerFactoryBean;
 import org.springframework.stereotype.Controller;
@@ -99,7 +105,7 @@ public class WMSController extends AbstractSecureController{
      * add pixel radius for wms highlight circles
      */
     @Value("${wms.highlight.radius:3}")
-    private static int HIGHLIGHT_RADIUS;
+    public static int HIGHLIGHT_RADIUS;
     /**
      * Global wms cache enable. WMS requests can disable adding to the cache using CACHE=off. WMS CACHE=off will still
      * read from the cache.
@@ -568,7 +574,7 @@ public class WMSController extends AbstractSecureController{
             return new SearchResultDTO();
         }
 
-        //searchUtils.updateSpatial(requestParams);
+        // TODO: Stream result instead of loading it all into biocache-service
         SearchResultDTO searchResult = searchDAO.findByFulltextSpatialQuery(requestParams, null);
         model.addAttribute("searchResult", searchResult);
 
@@ -609,53 +615,7 @@ public class WMSController extends AbstractSecureController{
     }
 
     private void writeOccurrencesCsvToStream(SpatialSearchRequestParams requestParams, OutputStream stream) throws Exception {
-        SolrDocumentList sdl = searchDAO.findByFulltext(requestParams);
-
-        byte[] bComma = ",".getBytes("UTF-8");
-        byte[] bNewLine = "\n".getBytes("UTF-8");
-        byte[] bDblQuote = "\"".getBytes("UTF-8");
-
-        if (sdl != null && sdl.size() > 0) {
-            //header field identification
-            ArrayList<String> header = new ArrayList<String>();
-            if (requestParams.getFl() == null || requestParams.getFl().isEmpty()) {
-                TreeSet<String> unique = new TreeSet<String>();
-                for (int i = 0; i < sdl.size(); i++) {
-                    unique.addAll(sdl.get(i).getFieldNames());
-                }
-                header = new ArrayList<String>(unique);
-            } else {
-                String[] fields = requestParams.getFl().split(",");
-                for (int i = 0; i < fields.length; i++) {
-                    if (fields[i].length() > 0) {
-                        header.add(fields[i]);
-                    }
-                }
-            }
-
-            //write header
-            for (int i = 0; i < header.size(); i++) {
-                if (i > 0) {
-                    stream.write(bComma);
-                }
-                stream.write(header.get(i).getBytes("UTF-8"));
-            }
-
-            //write records
-            for (int i = 0; i < sdl.size(); i++) {
-                stream.write(bNewLine);
-                for (int j = 0; j < header.size(); j++) {
-                    if (j > 0) {
-                        stream.write(bComma);
-                    }
-                    if (sdl.get(i).containsKey(header.get(j))) {
-                        stream.write(bDblQuote);
-                        stream.write(String.valueOf(sdl.get(i).getFieldValue(header.get(j))).replace("\"", "\"\"").getBytes("UTF-8"));
-                        stream.write(bDblQuote);
-                    }
-                }
-            }
-        }
+        ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).streamingQuery(requestParams, null, new StreamAsCSV(stream, requestParams), null);
     }
 
     private void writeBytes(HttpServletResponse response, byte[] bytes) throws IOException {
@@ -669,32 +629,6 @@ public class WMSController extends AbstractSecureController{
         } catch (Exception e) {
             logger.error(e.getMessage(), e);
         }
-    }
-
-    int scaleLatitudeForImage(double lat, double top, double bottom, int pixelHeight) {
-        return (int) (((lat - top) / (bottom - top)) * pixelHeight);
-    }
-
-    int scaleLongitudeForImage(double lng, double left, double right, int pixelWidth) {
-        return (int) (((lng - left) / (right - left)) * pixelWidth);
-    }
-    double convertMetersToLng(double meters) {
-        return meters / 20037508.342789244 * 180;
-    }
-
-    //    //http://mapsforge.googlecode.com/svn-history/r1841/trunk/mapsforge-map-writer/src/main/java/org/mapsforge/map/writer/model/MercatorProjection.java
-    double convertLngToMeters(double lng) {
-        return 6378137.0 * Math.PI / 180 * lng;
-    }
-
-    //
-    //    public static final double WGS_84_EQUATORIALRADIUS = 6378137.0;
-    double convertLatToMeters(double lat) {
-        return 6378137.0 * Math.log(Math.tan(Math.PI / 180 * (45 + lat / 2.0)));
-    }
-
-    double convertMetersToLat(double meters) {
-        return 180.0 / Math.PI * (2 * Math.atan(Math.exp(meters / 20037508.342789244 * Math.PI)) - Math.PI / 2.0);
     }
 
     /**
@@ -803,30 +737,28 @@ public class WMSController extends AbstractSecureController{
     // add this to the GetCapabilities...
     @RequestMapping(value = {"/ogc/getMetadata"}, method = RequestMethod.GET)
     public String getMetadata(
-            @RequestParam(value = "LAYER", required = false, defaultValue = "") String layer,
-            @RequestParam(value = "q", required = false, defaultValue = "") String query,
+            GetMetadata getMetadata,
             HttpServletRequest request,
             HttpServletResponse response,
             Model model
     ) throws Exception {
-
         String taxonName = "";
         String rank = "";
         String q = "";
-        if (StringUtils.trimToNull(layer) != null) {
-            String[] parts = layer.split(":");
+        if (StringUtils.trimToNull(getMetadata.getLayer()) != null) {
+            String[] parts = getMetadata.getLayer().split(":");
             taxonName = parts[parts.length - 1];
             if (parts.length > 1) {
                 rank = parts[0];
             }
-            q = layer;
-        } else if (StringUtils.trimToNull(query) != null) {
-            String[] parts = query.split(":");
+            q = getMetadata.getLayer();
+        } else if (StringUtils.trimToNull(getMetadata.getQuery()) != null) {
+            String[] parts = getMetadata.getQuery().split(":");
             taxonName = parts[parts.length - 1];
             if (parts.length > 1) {
                 rank = parts[0];
             }
-            q = query;
+            q = getMetadata.getQuery();
         } else {
             response.sendError(400);
         }
@@ -922,22 +854,14 @@ public class WMSController extends AbstractSecureController{
 
     @RequestMapping(value = {"/ogc/getFeatureInfo"}, method = RequestMethod.GET)
     public String getFeatureInfo(
-            @RequestParam(value = "ENV", required = false, defaultValue = "") String env,
-            @RequestParam(value = "BBOX", required = true, defaultValue = "0,-90,180,0") String bboxString,
-            @RequestParam(value = "WIDTH", required = true, defaultValue = "256") Integer width,
-            @RequestParam(value = "HEIGHT", required = true, defaultValue = "256") Integer height,
-            @RequestParam(value = "STYLES", required = false, defaultValue = "") String styles,
-            @RequestParam(value = "SRS", required = false, defaultValue = "EPSG:3857") String srs,
-            @RequestParam(value = "QUERY_LAYERS", required = false, defaultValue = "") String queryLayers,
-            @RequestParam(value = "X", required = true, defaultValue = "0") Double x,
-            @RequestParam(value = "Y", required = true, defaultValue = "0") Double y,
+            GetFeatureInfo getFeatureInfo,
             Model model) throws Exception {
 
         if (logger.isDebugEnabled()) {
-            logger.debug("WMS - GetFeatureInfo requested for: " + queryLayers);
+            logger.debug("WMS - GetFeatureInfo requested for: " + getFeatureInfo.getQuery_layers());
         }
 
-        WmsEnv vars = new WmsEnv(env, styles);
+        WmsEnv vars = new WmsEnv(getFeatureInfo.getEnv(), getFeatureInfo.getStyles());
         double[] mbbox = new double[4];
         double[] bbox = new double[4];
         double[] pbbox = new double[4];
@@ -945,46 +869,41 @@ public class WMSController extends AbstractSecureController{
         int size = vars.size + (vars.highlight != null ? HIGHLIGHT_RADIUS * 2 + (int) (vars.size * 0.2) : 0) + 5;  //bounding box buffer
 
         CRSAuthorityFactory factory = CRS.getAuthorityFactory(true);
-        CoordinateReferenceSystem sourceCRS = factory.createCoordinateReferenceSystem(srs);
+        CoordinateReferenceSystem sourceCRS = factory.createCoordinateReferenceSystem(getFeatureInfo.getSrs());
         CoordinateReferenceSystem targetCRS = factory.createCoordinateReferenceSystem("EPSG:4326");
         CoordinateOperation transformTo4326 = new DefaultCoordinateOperationFactory().createOperation(sourceCRS, targetCRS);
 
         double resolution;
 
         // support for any srs
-        resolution = getBBoxesSRS(transformTo4326, bboxString, width, height, size, vars.uncertainty, mbbox, bbox, pbbox, tilebbox);
+        resolution = getBBoxesSRS(transformTo4326, getFeatureInfo.getBbox(), getFeatureInfo.getWidth(),
+                getFeatureInfo.getHeight(), size, vars.uncertainty, mbbox, bbox, pbbox, tilebbox);
 
         //resolution should be a value < 1
         PointType pointType = getPointTypeForDegreesPerPixel(resolution);
 
-        double longitude = bbox[0] + (((bbox[2] - bbox[0]) / width.doubleValue()) * x);
-        double latitude = bbox[3] - (((bbox[3] - bbox[1]) / height.doubleValue()) * y);
-
-        //round to the correct point size
-//        double roundedLongitude = pointType.roundToPointType(longitude);
-//        double roundedLatitude = pointType.roundToPointType(latitude);
-        double roundedLongitude =longitude;
-        double roundedLatitude =latitude;
+        double longitude = bbox[0] + (((bbox[2] - bbox[0]) / getFeatureInfo.getWidth().doubleValue()) * getFeatureInfo.getX());
+        double latitude = bbox[3] - (((bbox[3] - bbox[1]) / getFeatureInfo.getHeight().doubleValue()) * getFeatureInfo.getY());
 
         //get the pixel size of the circles
-        double minLng = pointType.roundDownToPointType(roundedLongitude - (pointType.getValue() * 2 * (size + 3)));
-        double maxLng = pointType.roundUpToPointType(roundedLongitude + (pointType.getValue() * 2 * (size + 3)));
-        double minLat = pointType.roundDownToPointType(roundedLatitude - (pointType.getValue() * 2 * (size + 3)));
-        double maxLat = pointType.roundUpToPointType(roundedLatitude + (pointType.getValue() * 2 * (size + 3)));
+        double minLng = pointType.roundDownToPointType(longitude - (pointType.getValue() * 2 * (size + 3)));
+        double maxLng = pointType.roundUpToPointType(latitude + (pointType.getValue() * 2 * (size + 3)));
+        double minLat = pointType.roundDownToPointType(longitude - (pointType.getValue() * 2 * (size + 3)));
+        double maxLat = pointType.roundUpToPointType(latitude + (pointType.getValue() * 2 * (size + 3)));
 
         //do the SOLR query
         SpatialSearchRequestParams requestParams = new SpatialSearchRequestParams();
-        String q = WMSUtils.convertLayersParamToQ(queryLayers);
-        requestParams.setQ(WMSUtils.convertLayersParamToQ(queryLayers));  //need to derive this from the layer name
+        String q = WMSUtils.convertLayersParamToQ(getFeatureInfo.getQuery_layers());
+        requestParams.setQ(WMSUtils.convertLayersParamToQ(getFeatureInfo.getQuery_layers()));  //need to derive this from the layer name
         if (logger.isDebugEnabled()) {
-            logger.debug("WMS GetFeatureInfo for " + queryLayers + ", longitude:[" + minLng + " TO " + maxLng + "],  latitude:[" + minLat + " TO " + maxLat + "]");
+            logger.debug("WMS GetFeatureInfo for " + getFeatureInfo.getQuery_layers() + ", longitude:[" + minLng + " TO " + maxLng + "],  latitude:[" + minLat + " TO " + maxLat + "]");
         }
 
         String[] fqs = new String[]{"longitude:[" + minLng + " TO " + maxLng + "]", "latitude:[" + minLat + " TO " + maxLat + "]"};
         requestParams.setFq(fqs);
         requestParams.setFacet(false);
 
-        //TODO: paging
+        // TODO: Stream result instead of loading it all into biocache-service
         SolrDocumentList sdl = searchDAO.findByFulltext(requestParams);
 
         //send back the results.
@@ -1013,22 +932,19 @@ public class WMSController extends AbstractSecureController{
 
     @RequestMapping(value = {"/ogc/legendGraphic"}, method = RequestMethod.GET)
     public void getLegendGraphic(
-            @RequestParam(value = "ENV", required = false, defaultValue = "") String env,
-            @RequestParam(value = "STYLE", required = false, defaultValue = "8b0000;opacity=1;size=5") String style,
-            @RequestParam(value = "WIDTH", required = false, defaultValue = "30") Integer width,
-            @RequestParam(value = "HEIGHT", required = false, defaultValue = "20") Integer height,
+            GetLegendGraphic legendGraphic,
             HttpServletRequest request,
             HttpServletResponse response) throws Exception {
 
         try {
-            if (StringUtils.trimToNull(env) == null && StringUtils.trimToNull(style) == null) {
-                style = "8b0000;opacity=1;size=5";
+            if (StringUtils.trimToNull(legendGraphic.getEnv()) == null && StringUtils.trimToNull(legendGraphic.getStyle()) == null) {
+                legendGraphic.setStyle("8b0000;opacity=1;size=5");
             }
 
-            WmsEnv wmsEnv = new WmsEnv(env, style);
-            BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+            WmsEnv wmsEnv = new WmsEnv(legendGraphic.getEnv(), legendGraphic.getStyle());
+            BufferedImage img = new BufferedImage(legendGraphic.getWidth(), legendGraphic.getHeight(), BufferedImage.TYPE_INT_ARGB);
             Graphics2D g = (Graphics2D) img.getGraphics();
-            int size = width > height ? height : width;
+            int size = legendGraphic.getWidth() > legendGraphic.getHeight() ? legendGraphic.getHeight() : legendGraphic.getWidth();
             Paint fill = new Color(wmsEnv.colour | wmsEnv.alpha << 24);
             g.setPaint(fill);
             g.fillOval(0, 0, size, size);
@@ -1050,28 +966,7 @@ public class WMSController extends AbstractSecureController{
      * Returns a get capabilities response by default.
      *
      * @param requestParams
-     * @param cql_filter
-     * @param env
-     * @param srs
-     * @param styles
-     * @param style
-     * @param bboxString
-     * @param width
-     * @param height
-     * @param cache
-     * @param requestString
-     * @param outlinePoints
-     * @param outlineColour
-     * @param layers
-     * @param query
-     * @param filterQueries
-     * @param x
-     * @param y
-     * @param spatiallyValidOnly
-     * @param marineOnly
-     * @param terrestrialOnly
-     * @param limitToFocus
-     * @param useSpeciesGroups
+     * @param getOgc
      * @param request
      * @param response
      * @param model
@@ -1080,73 +975,28 @@ public class WMSController extends AbstractSecureController{
     @RequestMapping(value = {"/ogc/ows", "/ogc/capabilities"}, method = RequestMethod.GET)
     public void getCapabilities(
             SpatialSearchRequestParams requestParams,
-            @RequestParam(value = "CQL_FILTER", required = false, defaultValue = "") String cql_filter,
-            @RequestParam(value = "ENV", required = false, defaultValue = "") String env,
-            @RequestParam(value = "SRS", required = false, defaultValue = "EPSG:3857") String srs, //default to google mercator
-            @RequestParam(value = "STYLES", required = false, defaultValue = "") String styles,
-            @RequestParam(value = "STYLE", required = false, defaultValue = "") String style,
-            @RequestParam(value = "BBOX", required = false, defaultValue = "") String bboxString,
-            @RequestParam(value = "WIDTH", required = false, defaultValue = "256") Integer width,
-            @RequestParam(value = "HEIGHT", required = false, defaultValue = "256") Integer height,
-            @RequestParam(value = "CACHE", required = false, defaultValue = "default") String cache,
-            @RequestParam(value = "REQUEST", required = false, defaultValue = "") String requestString,
-            @RequestParam(value = "OUTLINE", required = false, defaultValue = "false") boolean outlinePoints,
-            @RequestParam(value = "OUTLINECOLOUR", required = false, defaultValue = "0x000000") String outlineColour,
-            @RequestParam(value = "LAYERS", required = false, defaultValue = "") String layers,
-            @RequestParam(value = "q", required = false, defaultValue = "*:*") String query,
-            @RequestParam(value = "fq", required = false) String[] filterQueries,
-            @RequestParam(value = "X", required = true, defaultValue = "0") Double x,
-            @RequestParam(value = "Y", required = true, defaultValue = "0") Double y,
-            @RequestParam(value = "spatiallyValidOnly", required = false, defaultValue = "true") boolean spatiallyValidOnly,
-            @RequestParam(value = "marineSpecies", required = false, defaultValue = "false") boolean marineOnly,
-            @RequestParam(value = "terrestrialSpecies", required = false, defaultValue = "false") boolean terrestrialOnly,
-            @RequestParam(value = "limitToFocus", required = false, defaultValue = "false") boolean limitToFocus,
-            @RequestParam(value = "useSpeciesGroups", required = false, defaultValue = "false") boolean useSpeciesGroups,
-            @RequestParam(value = "GRIDDETAIL", required = false, defaultValue = "16") int gridDivisionCount,
+            GetOgc getOgc,
             HttpServletRequest request,
             HttpServletResponse response,
             Model model)
             throws Exception {
 
-        if ("GetMap".equalsIgnoreCase(requestString)) {
-            generateWmsTile(
-                    requestParams,
-                    cql_filter,
-                    env,
-                    srs,
-                    styles,
-                    bboxString,
-                    width,
-                    height,
-                    cache,
-                    requestString,
-                    outlinePoints,
-                    outlineColour,
-                    layers,
-                    null,
-                    gridDivisionCount,
-                    request,
-                    response);
+        if ("GetMap".equalsIgnoreCase(getOgc.getRequest())) {
+            generateWmsTile(requestParams, getOgc, request, response);
             return;
         }
 
-        if ("GetLegendGraphic".equalsIgnoreCase(requestString)) {
-            getLegendGraphic(env, style, 30, 20, request, response);
+        if ("GetLegendGraphic".equalsIgnoreCase(getOgc.getRequest())) {
+            GetLegendGraphic legendGraphic = new GetLegendGraphic();
+            legendGraphic.setEnv(getOgc.getEnv());
+            if (StringUtils.isEmpty((getOgc.getStyle()))) legendGraphic.setStyle(getOgc.getStyles());
+            else legendGraphic.setStyle(getOgc.getStyle());
+            getLegendGraphic(getOgc, request, response);
             return;
         }
 
-        if ("GetFeatureInfo".equalsIgnoreCase(requestString)) {
-            getFeatureInfo(
-                    env,
-                    bboxString,
-                    width,
-                    height,
-                    styles,
-                    srs,
-                    layers,
-                    x,
-                    y,
-                    model);
+        if ("GetFeatureInfo".equalsIgnoreCase(getOgc.getRequest())) {
+            getFeatureInfo(getOgc, model);
             return;
         }
 
@@ -1265,29 +1115,32 @@ public class WMSController extends AbstractSecureController{
 
             writer.write(generateStylesForPoints());
 
-            if (spatiallyValidOnly) {
+            String[] filterQueries = requestParams.getFq();
+            if (filterQueries == null) filterQueries = new String[]{};
+
+            if (getOgc.isSpatiallyValidOnly()) {
                 filterQueries = org.apache.commons.lang3.ArrayUtils.add(filterQueries, "geospatial_kosher:true");
             }
 
-            if (marineOnly) {
+            if (getOgc.isMarineOnly()) {
                 filterQueries = org.apache.commons.lang3.ArrayUtils.add(filterQueries, "species_habitats:Marine OR species_habitats:\"Marine and Non-marine\"");
             }
 
-            if (terrestrialOnly) {
+            if (getOgc.isTerrestrialOnly()) {
                 filterQueries = org.apache.commons.lang3.ArrayUtils.add(filterQueries, "species_habitats:\"Non-marine\" OR species_habitats:Limnetic");
             }
 
-            if (limitToFocus) {
-                //TODO retrieve focus from config file
+            if (getOgc.isLimitToFocus()) {
                 filterQueries = org.apache.commons.lang3.ArrayUtils.add(filterQueries, limitToFocusValue);
             }
 
+            String query = requestParams.getQ();
             query = searchUtils.convertRankAndName(query);
             if (logger.isDebugEnabled()) {
                 logger.debug("GetCapabilities query in use: " + query);
             }
 
-            if (useSpeciesGroups) {
+            if (getOgc.isUseSpeciesGroups()) {
                 taxonDAO.extractBySpeciesGroups(baseWsUrl + "/ogc/getMetadata", query, filterQueries, writer);
             } else {
                 taxonDAO.extractHierarchy(baseWsUrl + "/ogc/getMetadata", query, filterQueries, writer);
@@ -1352,60 +1205,43 @@ public class WMSController extends AbstractSecureController{
     /**
      * WMS service for webportal.
      *
-     * @param cql_filter q value.
-     * @param env        ';' delimited field:value pairs.  See Env
-     * @param bboxString
-     * @param width
-     * @param height
-     * @param cache      'on' = use cache, 'off' = do not use cache this
-     *                   also removes any related cache data.
      * @param response
      * @throws Exception
      */
     @RequestMapping(value = {"/webportal/wms/reflect", "/ogc/wms/reflect", "/mapping/wms/reflect"}, method = RequestMethod.GET)
     public ModelAndView generateWmsTile(
             SpatialSearchRequestParams requestParams,
-            @RequestParam(value = "CQL_FILTER", required = false, defaultValue = "") String cql_filter,
-            @RequestParam(value = "ENV", required = false, defaultValue = "") String env,
-            @RequestParam(value = "SRS", required = false, defaultValue = "EPSG:3857") String srs, //default to google mercator
-            @RequestParam(value = "STYLES", required = false, defaultValue = "") String styles,
-            @RequestParam(value = "BBOX", required = true, defaultValue = "") String bboxString,
-            @RequestParam(value = "WIDTH", required = true, defaultValue = "256") Integer width,
-            @RequestParam(value = "HEIGHT", required = true, defaultValue = "256") Integer height,
-            @RequestParam(value = "CACHE", required = true, defaultValue = "default") String cache,
-            @RequestParam(value = "REQUEST", required = true, defaultValue = "") String requestString,
-            @RequestParam(value = "OUTLINE", required = true, defaultValue = "true") boolean outlinePoints,
-            @RequestParam(value = "OUTLINECOLOUR", required = true, defaultValue = "0x000000") String outlineColour,
-            @RequestParam(value = "LAYERS", required = false, defaultValue = "") String layers,
-            @RequestParam(value = "HQ", required = false) String[] hqs,
-            @RequestParam(value = "GRIDDETAIL", required = false, defaultValue = "16") Integer gridDivisionCount,
+            GetMap getMap,
             HttpServletRequest request,
             HttpServletResponse response)
             throws Exception {
 
         //for OS Grids, hand over to WMS OS controller
-        if(env != null && env.contains("osgrid")){
-            wmsosGridController.generateWmsTile(requestParams, cql_filter, env, srs, styles, bboxString, layers, width, height, outlinePoints, outlineColour, request, response);
+        if (getMap.getEnv() != null && getMap.getEnv().contains("osgrid")) {
+            wmsosGridController.generateWmsTile(requestParams, getMap, request, response);
             return null;
         }
 
         //correct cache value
-        if ("default".equals(cache)) cache = wmsCacheEnabled ? "on" : "off";
+        if ("default".equals(getMap.getCache())) getMap.setCache(wmsCacheEnabled ? "on" : "off");
 
         //Some WMS clients are ignoring sections of the GetCapabilities....
-        if ("GetLegendGraphic".equalsIgnoreCase(requestString)) {
-            getLegendGraphic(env, styles, 30, 20, request, response);
+        if ("GetLegendGraphic".equalsIgnoreCase(getMap.getRequest())) {
+            GetLegendGraphic legendGraphic = new GetLegendGraphic();
+            legendGraphic.setEnv(getMap.getEnv());
+            legendGraphic.setStyle(getMap.getStyles());
+            getLegendGraphic(legendGraphic, request, response);
             return null;
         }
 
-        if (StringUtils.isBlank(bboxString)){
+        if (StringUtils.isBlank(getMap.getBbox())) {
             return sendWmsError(response, 400, "MissingOrInvalidParameter",
                     "Missing valid BBOX parameter");
         }
 
         Set<Integer> hq = new HashSet<Integer>();
-        if (hqs != null && hqs.length > 0) {
-            for (String h : hqs) {
+        if (getMap.getHq() != null && getMap.getHq().length > 0) {
+            for (String h : getMap.getHq()) {
                 hq.add(Integer.parseInt(h));
             }
         }
@@ -1418,7 +1254,7 @@ public class WMSController extends AbstractSecureController{
         response.setHeader("ETag", wmsETag.get());
         response.setContentType("image/png"); //only png images generated
 
-        WmsEnv vars = new WmsEnv(env, styles);
+        WmsEnv vars = new WmsEnv(getMap.getEnv(), getMap.getStyles());
         double[] mbbox = new double[4];
         double[] bbox = new double[4];
         double[] pbbox = new double[4];
@@ -1429,7 +1265,7 @@ public class WMSController extends AbstractSecureController{
         int size = steppedSize + (vars.highlight != null ? HIGHLIGHT_RADIUS * 2 + (int) (steppedSize * 0.2) : 0) + 5;  //bounding box buffer
 
         CRSAuthorityFactory factory = CRS.getAuthorityFactory(true);
-        CoordinateReferenceSystem sourceCRS = factory.createCoordinateReferenceSystem(srs);
+        CoordinateReferenceSystem sourceCRS = factory.createCoordinateReferenceSystem(getMap.getSrs());
         CoordinateReferenceSystem targetCRS = factory.createCoordinateReferenceSystem("EPSG:4326");
         CoordinateOperation transformTo4326 = new DefaultCoordinateOperationFactory().createOperation(sourceCRS, targetCRS);
         CoordinateOperation transformFrom4326 = new DefaultCoordinateOperationFactory().createOperation(targetCRS, sourceCRS);
@@ -1437,7 +1273,8 @@ public class WMSController extends AbstractSecureController{
         double resolution;
 
         // support for any srs
-        resolution = getBBoxesSRS(transformTo4326, bboxString, width, height, size, vars.uncertainty, mbbox, bbox, pbbox, tilebbox);
+        resolution = getBBoxesSRS(transformTo4326, getMap.getBbox(), getMap.getWidth(), getMap.getHeight(), size,
+                vars.uncertainty, mbbox, bbox, pbbox, tilebbox);
 
         PointType pointType = getPointTypeForDegreesPerPixel(resolution);
         if (logger.isDebugEnabled()) {
@@ -1449,16 +1286,16 @@ public class WMSController extends AbstractSecureController{
         boundingBoxFqs[1] = String.format("latitude:[%f TO %f]", bbox[1], bbox[3]);
 
         int pointWidth = vars.size * 2;
-        double width_mult = (width / (pbbox[2] - pbbox[0]));
-        double height_mult = (height / (pbbox[1] - pbbox[3]));
+        double width_mult = (getMap.getWidth() / (pbbox[2] - pbbox[0]));
+        double height_mult = (getMap.getHeight() / (pbbox[1] - pbbox[3]));
 
 
         //CQL Filter takes precedence of the layer
         String q = "";
-        if (StringUtils.trimToNull(cql_filter) != null) {
-            q = WMSUtils.getQ(cql_filter);
-        } else if (StringUtils.trimToNull(layers) != null && !"ALA:Occurrences".equalsIgnoreCase(layers)) {
-            q = WMSUtils.convertLayersParamToQ(layers);
+        if (StringUtils.trimToNull(getMap.getCqlFilter()) != null) {
+            q = WMSUtils.getQ(getMap.getCqlFilter());
+        } else if (StringUtils.trimToNull(getMap.getLayers()) != null && !"ALA:Occurrences".equalsIgnoreCase(getMap.getLayers())) {
+            q = WMSUtils.convertLayersParamToQ(getMap.getLayers());
         }
 
         //build request
@@ -1483,25 +1320,30 @@ public class WMSController extends AbstractSecureController{
         String[] originalFqs = qidCacheDAO.getFq(requestParams);
 
         //get from cache, or make it
-        boolean canCache = wmsCache.isEnabled() && "on".equalsIgnoreCase(cache);
+        boolean canCache = wmsCache.isEnabled() && "on".equalsIgnoreCase(getMap.getCache());
         WMSTile wco = getWMSCacheObject(requestParams, vars, pointType, bbox, originalFqs, boundingBoxFqs, canCache);
 
         //correction for gridDivisionCount
         boolean isGrid = vars.colourMode.equals("grid");
         if (isGrid) {
-            if (gridDivisionCount > Math.min(width, height)) gridDivisionCount = Math.min(width, height);
-            if (gridDivisionCount < 0) gridDivisionCount = 1;
+            if (getMap.getGridDetail() > Math.min(getMap.getWidth(), getMap.getHeight())) {
+                getMap.setGridDetail(Math.min(getMap.getWidth(), getMap.getHeight()));
+            }
+            if (getMap.getGridDetail() < 0) {
+                getMap.setGridDetail(1);
+            }
 
             //gridDivisionCount correction
-            while (width % gridDivisionCount > 0 || height % gridDivisionCount > 0) {
-                gridDivisionCount--;
+            while (getMap.getWidth() % getMap.getGridDetail() > 0 || getMap.getHeight() % getMap.getGridDetail() > 0) {
+                getMap.setGridDetail(getMap.getGridDetail() - 1);
             }
         }
 
         ImgObj imgObj = wco.getPoints() == null ? null :
-                wmsCached(wco, requestParams, vars, pointType, pbbox, bbox, mbbox, width, height, width_mult,
-                        height_mult, pointWidth, originalFqs, hq, boundingBoxFqs, outlinePoints, outlineColour,
-                        response, tilebbox, gridDivisionCount, transformFrom4326);
+                wmsCached(wco, requestParams, vars, pointType, pbbox, bbox, mbbox, getMap.getWidth(),
+                        getMap.getHeight(), width_mult, height_mult, pointWidth, originalFqs, hq, boundingBoxFqs,
+                        getMap.isOutline(), getMap.getOutlineColour(), response, tilebbox, getMap.getGridDetail(),
+                        transformFrom4326);
 
         if (imgObj != null && imgObj.g != null) {
             imgObj.g.dispose();
@@ -1526,13 +1368,6 @@ public class WMSController extends AbstractSecureController{
     }
 
     private void transformBBox(CoordinateOperation op, String bbox, double[] source, double[] target) throws TransformException {
-//            if (lat1 <= -90) {
-//                lat1 = -89.999;
-//            }
-//            if (lat2 >= 90) {
-//                lat2 = 89.999;
-//            }
-
         String[] bb = bbox.split(",");
 
         source[0] = Double.parseDouble(bb[0]);
@@ -1557,65 +1392,29 @@ public class WMSController extends AbstractSecureController{
 
     /**
      * Method that produces the downloadable map integrated in AVH/OZCAM/Biocache.
-     *
-     * @param requestParams
-     * @param format
-     * @param extents bounding box in decimal degrees
-     * @param bboxString bounding box in target SRS
-     * @param widthMm
-     * @param pointRadiusMm
-     * @param pradiusPx
-     * @param pointColour
-     * @param pointOpacity
-     * @param baselayer
-     * @param scale
-     * @param dpi
-     * @param outlinePoints
-     * @param outlineColour
-     * @param fileName
-     * @param request
-     * @param response
-     * @throws Exception
      */
     @RequestMapping(value = {"/webportal/wms/image", "/mapping/wms/image"}, method = RequestMethod.GET)
     public void generatePublicationMap(
             SpatialSearchRequestParams requestParams,
-            @RequestParam(value = "format", required = false, defaultValue = "jpg") String format,
-            @RequestParam(value = "extents", required = false) String extents,
-            @RequestParam(value = "bbox", required = false) String bboxString,
-            @RequestParam(value = "widthmm", required = false, defaultValue = "60") Double widthMm,
-            @RequestParam(value = "pradiusmm", required = false, defaultValue = "2") Double pointRadiusMm,
-            @RequestParam(value = "pradiuspx", required = false) Integer pradiusPx,
-            @RequestParam(value = "pcolour", required = false, defaultValue = "FF0000") String pointColour,
-            @RequestParam(value = "ENV", required = false, defaultValue = "") String env,
-            @RequestParam(value = "SRS", required = false, defaultValue = "EPSG:3857") String srs,
-            @RequestParam(value = "popacity", required = false, defaultValue = "0.8") Double pointOpacity,
-            @RequestParam(value = "baselayer", required = false, defaultValue = "world") String baselayer,
-            @RequestParam(value = "scale", required = false, defaultValue = "off") String scale,
-            @RequestParam(value = "dpi", required = false, defaultValue = "300") Integer dpi,
-            @RequestParam(value = "baselayerStyle", required = false, defaultValue = "") String baselayerStyle,
-            @RequestParam(value = "outline", required = true, defaultValue = "false") boolean outlinePoints,
-            @RequestParam(value = "outlineColour", required = true, defaultValue = "#000000") String outlineColour,
-            @RequestParam(value = "fileName", required = false) String fileName,
-            @RequestParam(value = "baseMap", required = false, defaultValue = "ALA") String baseMap,
+            GetImage getImage,
             HttpServletRequest request, HttpServletResponse response) throws Exception {
 
         // convert extents from EPSG:4326 into target SRS
         CRSAuthorityFactory factory = CRS.getAuthorityFactory(true);
-        CoordinateReferenceSystem sourceCRS = factory.createCoordinateReferenceSystem(srs);
+        CoordinateReferenceSystem sourceCRS = factory.createCoordinateReferenceSystem(getImage.getSrs());
         CoordinateReferenceSystem targetCRS = factory.createCoordinateReferenceSystem("EPSG:4326");
         CoordinateOperation transformTo4326 = new DefaultCoordinateOperationFactory().createOperation(sourceCRS, targetCRS);
         CoordinateOperation transformFrom4326 = new DefaultCoordinateOperationFactory().createOperation(targetCRS, sourceCRS);
         double[] bbox4326 = new double[4];     // extents in EPSG:4326
         double[] bboxSRS = new double[4];      //extents in target SRS
-        if (bboxString != null) {
-            transformBBox(transformTo4326, bboxString, bboxSRS, bbox4326);
+        if (getImage.getBbox() != null) {
+            transformBBox(transformTo4326, getImage.getBbox(), bboxSRS, bbox4326);
         } else {
-            transformBBox(transformFrom4326, extents, bbox4326, bboxSRS);
-            bboxString = bboxSRS[0] + "," + bboxSRS[1] + "," + bboxSRS[2] + "," + bboxSRS[3];
+            transformBBox(transformFrom4326, getImage.getExtents(), bbox4326, bboxSRS);
+            getImage.setBbox(bboxSRS[0] + "," + bboxSRS[1] + "," + bboxSRS[2] + "," + bboxSRS[3]);
         }
 
-        int width = (int) ((dpi / 25.4) * widthMm);
+        int width = (int) ((getImage.getDpi() / 25.4) * getImage.getWidthMm());
         int height = (int) Math.round(width * ((bboxSRS[3] - bboxSRS[1]) / (bboxSRS[2] - bboxSRS[0])));
 
         if (height * width > MAX_IMAGE_PIXEL_COUNT) {
@@ -1625,16 +1424,16 @@ public class WMSController extends AbstractSecureController{
         }
 
         int pointSize = -1;
-        if (pradiusPx != null) {
-            pointSize = (int) pradiusPx;
+        if (getImage.getPradiusPx() != null) {
+            pointSize = (int) getImage.getPradiusPx();
         } else {
-            pointSize = (int) ((dpi / 25.4) * pointRadiusMm);
+            pointSize = (int) ((getImage.getDpi() / 25.4) * getImage.getPointRadiusMm());
         }
 
-        String rendering = "ENV=color%3A" + pointColour + "%3Bname%3Acircle%3Bsize%3A" + pointSize
-                + "%3Bopacity%3A" + pointOpacity;
-        if(StringUtils.isNotEmpty(env)){
-            rendering = "ENV=" + env;
+        String rendering = "ENV=color%3A" + getImage.getPointColour() + "%3Bname%3Acircle%3Bsize%3A" + pointSize
+                + "%3Bopacity%3A" + getImage.getPointOpacity();
+        if (StringUtils.isNotEmpty(getImage.getEnv())) {
+            rendering = "ENV=" + getImage.getEnv();
         }
 
         //"http://biocache.ala.org.au/ws/webportal/wms/reflect?
@@ -1643,10 +1442,10 @@ public class WMSController extends AbstractSecureController{
         String speciesAddress = baseWsUrl
                 + "/ogc/wms/reflect?"
                 + rendering
-                + "&SRS=" + srs
-                + "&BBOX=" + bboxString
+                + "&SRS=" + getImage.getSrs()
+                + "&BBOX=" + getImage.getBbox()
                 + "&WIDTH=" + width + "&HEIGHT=" + height
-                + "&OUTLINE=" + outlinePoints + "&OUTLINECOLOUR=" + outlineColour;
+                + "&OUTLINE=" + getImage.isOutline() + "&OUTLINECOLOUR=" + getImage.getOutlineColour();
 
         //get query parameters
         String q = request.getParameter("q");
@@ -1667,22 +1466,22 @@ public class WMSController extends AbstractSecureController{
         //LAYERS=ALA%3Aworld&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=
         //&FORMAT=image%2Fjpeg&SRS=EPSG%3A900913&BBOX=12523443.0512,-1252343.932,13775787.3224,0.33920000004582&WIDTH=256&HEIGHT=256"
         String layout = "";
-        if (!scale.equals("off")) {
+        if (!getImage.getScale().equals("off")) {
             layout += "layout:scale";
         }
         String basemapAddress = geoserverUrl + "/wms/reflect?"
-                + "LAYERS=ALA%3A" + baselayer
-                + "&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=" + baselayerStyle
-                + "&FORMAT=image%2Fpng&SRS=" + srs     //specify the mercator projection
-                + "&BBOX=" + bboxString
-                + "&WIDTH=" + width + "&HEIGHT=" + height + "&OUTLINE=" + outlinePoints
-                + "&format_options=dpi:" + dpi + ";" + layout;
+                + "LAYERS=ALA%3A" + getImage.getBaseLayer()
+                + "&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=" + getImage.getBaselayerStyle()
+                + "&FORMAT=image%2Fpng&SRS=" + getImage.getSrs()     //specify the mercator projection
+                + "&BBOX=" + getImage.getBbox()
+                + "&WIDTH=" + width + "&HEIGHT=" + height + "&OUTLINE=" + getImage.isOutline()
+                + "&format_options=dpi:" + getImage.getDpi() + ";" + layout;
 
         BufferedImage basemapImage;
 
-        if ("roadmap".equalsIgnoreCase(baseMap) || "satellite".equalsIgnoreCase(baseMap) ||
-                "hybrid".equalsIgnoreCase(baseMap) || "terrain".equalsIgnoreCase(baseMap)){
-            basemapImage = basemapGoogle(width, height, bboxSRS, baseMap);
+        if ("roadmap".equalsIgnoreCase(getImage.getBaseMap()) || "satellite".equalsIgnoreCase(getImage.getBaseMap()) ||
+                "hybrid".equalsIgnoreCase(getImage.getBaseMap()) || "terrain".equalsIgnoreCase(getImage.getBaseMap())) {
+            basemapImage = basemapGoogle(width, height, bboxSRS, getImage.getBaseMap());
         } else {
             basemapImage = ImageIO.read(new URL(basemapAddress));
         }
@@ -1697,12 +1496,12 @@ public class WMSController extends AbstractSecureController{
         combined.dispose();
 
         //if filename supplied, force a download
-        if (fileName != null) {
+        if (getImage.getFileName() != null) {
             response.setContentType("application/octet-stream");
             response.setHeader("Content-Description", "File Transfer");
-            response.setHeader("Content-Disposition", "attachment; filename=" + fileName);
+            response.setHeader("Content-Disposition", "attachment; filename=" + getImage.getFileName());
             response.setHeader("Content-Transfer-Encoding", "binary");
-        } else if (format.equalsIgnoreCase("png")) {
+        } else if (getImage.getFormat().equalsIgnoreCase("png")) {
             response.setContentType("image/png");
         } else {
             response.setContentType("image/jpeg");
@@ -1711,9 +1510,9 @@ public class WMSController extends AbstractSecureController{
         response.setHeader("ETag", wmsETag.get());
 
         try {
-            if (format.equalsIgnoreCase("png")) {
+            if (getImage.getFormat().equalsIgnoreCase("png")) {
                 OutputStream os = response.getOutputStream();
-                ImageIO.write(img, format, os);
+                ImageIO.write(img, getImage.getFormat(), os);
                 os.close();
             } else {
                 //handle jpeg + BufferedImage.TYPE_INT_ARGB
@@ -1722,7 +1521,7 @@ public class WMSController extends AbstractSecureController{
                 (c2 = (Graphics2D) (img2 = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)).getGraphics()).drawImage(img, 0, 0, Color.WHITE, null);
                 c2.dispose();
                 OutputStream os = response.getOutputStream();
-                ImageIO.write(img2, format, os);
+                ImageIO.write(img2, getImage.getFormat(), os);
                 os.close();
             }
         } catch (Exception e) {
@@ -1766,8 +1565,8 @@ public class WMSController extends AbstractSecureController{
 
         int centerX = (int) ((extents[2] - extents[0]) / 2 + extents[0]);
         int centerY = (int) ((extents[3] - extents[1]) / 2 + extents[1]);
-        double latitude = convertMetersToLat(centerY);
-        double longitude = convertMetersToLng(centerX);
+        double latitude = SpatialUtils.convertMetersToLat(centerY);
+        double longitude = SpatialUtils.convertMetersToLng(centerX);
 
         //need to change the size requested so the extents match the output extents.
         int imgWidth = (int) ((extents[2] - extents[0]) / resolutions[res]);
@@ -1853,8 +1652,8 @@ public class WMSController extends AbstractSecureController{
                             try {
                                 GeneralDirectPosition sourceCoords = new GeneralDirectPosition(lng, lat);
                                 DirectPosition targetCoords = transformFrom4326.getMathTransform().transform(sourceCoords, null);
-                                x = scaleLongitudeForImage(targetCoords.getOrdinate(0), left, right, width);
-                                y = scaleLatitudeForImage(targetCoords.getOrdinate(1), top, bottom, height);
+                                x = SpatialUtils.scaleLongitudeForImage(targetCoords.getOrdinate(0), left, right, width);
+                                y = SpatialUtils.scaleLatitudeForImage(targetCoords.getOrdinate(1), top, bottom, height);
 
                                 if (x >= 0 && x < divs && y >= 0 && y < divs) {
                                     gridCounts[x][y] += count[i / 2];
@@ -1927,8 +1726,7 @@ public class WMSController extends AbstractSecureController{
 
             //uncertainty colour/fq/radius, [0]=map, [1]=not specified, [2]=too large
             Color[] uncertaintyColours = {new Color(255, 170, 0, vars.alpha), new Color(255, 255, 100, vars.alpha), new Color(50, 255, 50, vars.alpha)};
-            //TODO: don't assume MAX_UNCERTAINTY > default_uncertainty
-            String[] uncertaintyFqs = {"coordinate_uncertainty:[" + min_uncertainty + " TO " + MAX_UNCERTAINTY + "] AND -assertions:uncertaintyNotSpecified", "assertions:uncertaintyNotSpecified", "coordinate_uncertainty:[" + MAX_UNCERTAINTY + " TO *]"};
+            String[] uncertaintyFqs = {"coordinate_uncertainty:[" + min_uncertainty + " TO " + MAX_UNCERTAINTY + "]", "assertions:uncertaintyNotSpecified", "coordinate_uncertainty:[" + MAX_UNCERTAINTY + " TO *]"};
             double[] uncertaintyR = {-1, MAX_UNCERTAINTY, MAX_UNCERTAINTY};
 
             int originalFqsLength = originalFqs != null ? originalFqs.length : 0;
@@ -1954,46 +1752,52 @@ public class WMSController extends AbstractSecureController{
                 fqs[0] = uncertaintyFqs[j];
                 requestParams.setFq(fqs);
 
-                //There can be performance issues with pivot when too many distinct coordinate_uncertainty values
-                requestParams.setFacets(new String[]{"coordinate_uncertainty", pointType.getLabel()});
+                requestParams.setFacet(false);
+                requestParams.setPageSize(0);
                 requestParams.setFlimit(-1);
                 requestParams.setFormattedQuery(null);
-                List<FacetPivotResultDTO> qr = searchDAO.searchPivot(requestParams);
 
-                if (qr != null && qr.size() > 0) {
-                    List<FacetPivotResultDTO> piv = qr.get(0).getPivotResult();
+                SolrQuery query = ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).searchRequestToSolrQuery(requestParams, null, null);
+
+                // TODO: Is the loss of accuracy using a range facet with n-buckets acceptable? This should be much faster than a terms facet.
+                query.add("json.facet", "{facets:%20{%20type:terms,%20field:coordinate_uncertainty,limit:-1,%20facet:{points:%20{type:terms,field:point-0.1,%20limit:-1}}}}");
+                QueryResponse qr = ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).query(query, null);
+
+                List<SimpleOrderedMap> termsBuckets = SearchUtils.getList(qr.getResponse(), "facets", "facets", "buckets");
+
+                for (int i = 0; i < termsBuckets.size(); i++) {
+                    List<SimpleOrderedMap> pointBuckets = SearchUtils.getList(termsBuckets, i, "buckets");
 
                     double lng, lat;
                     int x, y;
-                    int uncertaintyRadius = (int) Math.ceil(uncertaintyR[j] * hmult);
 
                     g.setColor(uncertaintyColours[j]);
-                    for (FacetPivotResultDTO r : piv) {
-                        if (uncertaintyR[j] < 0) {
-                            uncertaintyRadius = (int) Math.ceil(Double.parseDouble(r.getValue()) * hmult);
-                        }
 
-                        for (FacetPivotResultDTO point : r.getPivotResult()) {
-                            String[] lat_lng = point.getValue().split(",");
+                    int uncertaintyRadius = (int) Math.ceil(uncertaintyR[j] * hmult);
+                    if (uncertaintyR[j] < 0) {
+                        uncertaintyRadius = (int) Math.ceil(((Number) termsBuckets.get(i).getVal(0)).doubleValue() * hmult);
+                    }
 
-                            lng = Double.parseDouble(lat_lng[1]);
-                            lat = Double.parseDouble(lat_lng[0]);
+                    for (int k = 0; k < pointBuckets.size(); k++) {
+                        String[] lat_lng = pointBuckets.get(k).getVal(0).toString().split(",");
 
-                            try {
-                                GeneralDirectPosition sourceCoords = new GeneralDirectPosition(lng, lat);
-                                DirectPosition targetCoords = transformFrom4326.getMathTransform().transform(sourceCoords, null);
-                                x = scaleLongitudeForImage(targetCoords.getOrdinate(0), left, right, width);
-                                y = scaleLatitudeForImage(targetCoords.getOrdinate(1), top, bottom, height);
+                        lng = Double.parseDouble(lat_lng[1]);
+                        lat = Double.parseDouble(lat_lng[0]);
 
-                                if (uncertaintyRadius > 0) {
-                                    g.drawOval(x - uncertaintyRadius, y - uncertaintyRadius, uncertaintyRadius * 2, uncertaintyRadius * 2);
-                                } else {
-                                    g.drawRect(x, y, 1, 1);
-                                }
-                            } catch (MismatchedDimensionException e) {
-                            } catch (TransformException e) {
-                                // failure to transform a coordinate will result in it not rendering
+                        try {
+                            GeneralDirectPosition sourceCoords = new GeneralDirectPosition(lng, lat);
+                            DirectPosition targetCoords = transformFrom4326.getMathTransform().transform(sourceCoords, null);
+                            x = SpatialUtils.scaleLongitudeForImage(targetCoords.getOrdinate(0), left, right, width);
+                            y = SpatialUtils.scaleLatitudeForImage(targetCoords.getOrdinate(1), top, bottom, height);
+
+                            if (uncertaintyRadius > 0) {
+                                g.drawOval(x - uncertaintyRadius, y - uncertaintyRadius, uncertaintyRadius * 2, uncertaintyRadius * 2);
+                            } else {
+                                g.drawRect(x, y, 1, 1);
                             }
+                        } catch (MismatchedDimensionException e) {
+                        } catch (TransformException e) {
+                            // failure to transform a coordinate will result in it not rendering
                         }
                     }
                 }
@@ -2017,47 +1821,12 @@ public class WMSController extends AbstractSecureController{
         requestParams.setFq(fqs);
         requestParams.setFlimit(-1);
         requestParams.setFormattedQuery(null);
-        FacetField ps = searchDAO.getFacetPointsShort(requestParams, pointType.getLabel());
 
-        if (ps != null && ps.getValueCount() > 0) {
-            if (imgObj == null || imgObj.img == null) {  //when vars.alpha == 0 img is null
-                imgObj = ImgObj.create(width, height);
-            }
-
-            int highightRadius = vars.size + HIGHLIGHT_RADIUS;
-            int highlightWidth = highightRadius * 2;
-
-            imgObj.g.setStroke(new BasicStroke(2));
-            imgObj.g.setColor(new Color(255, 0, 0, 255));
-            int x, y;
-
-            //for image scaling
-            double top = tilebbox[3];
-            double bottom = tilebbox[1];
-            double left = tilebbox[0];
-            double right = tilebbox[2];
-
-            for (int i = 0; i < ps.getValueCount(); i++) {
-                //extract lat lng
-                if (ps.getValues().get(i).getName() != null) {
-                    String[] lat_lng = ps.getValues().get(i).getName().split(",");
-                    float lng = Float.parseFloat(lat_lng[1]);
-                    float lat = Float.parseFloat(lat_lng[0]);
-
-                    try {
-                        GeneralDirectPosition sourceCoords = new GeneralDirectPosition(lng, lat);
-                        DirectPosition targetCoords = transformFrom4326.getMathTransform().transform(sourceCoords, null);
-                        x = scaleLongitudeForImage(targetCoords.getOrdinate(0), left, right, width);
-                        y = scaleLatitudeForImage(targetCoords.getOrdinate(1), top, bottom, height);
-
-                        imgObj.g.drawOval(x - highightRadius, y - highightRadius, highlightWidth, highlightWidth);
-                    } catch (MismatchedDimensionException e) {
-                    } catch (TransformException e) {
-                        // failure to transform a coordinate will result in it not rendering
-                    }
-                }
-            }
+        if (imgObj == null || imgObj.img == null) {  //when vars.alpha == 0 img is null
+            imgObj = ImgObj.create(width, height);
         }
+
+        ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).streamingQuery(requestParams, null, null, new DrawHighlight(imgObj, vars, tilebbox, width, height, transformFrom4326, this));
 
         return imgObj;
     }
@@ -2108,69 +1877,69 @@ public class WMSController extends AbstractSecureController{
                 requestParams.getWkt() + requestParams.getRadius() + requestParams.getLat() + requestParams.getLon();
 
         //qfull can be long if there is WKT
-        String q = String.valueOf(qfull.hashCode());
+        String cacheKey = String.valueOf(qfull.hashCode());
+        String bboxKey = StringUtils.join(origAndBBoxFqs, ",");
 
         //grid and -1 colour modes have the same data
         String cm = (vars.colourMode.equals("-1") || vars.colourMode.equals("grid")) ? "-1" : vars.colourMode;
 
-        //if too many points, cache with bbox string
-        boolean[] useBbox = new boolean[1];
+        //if too many points for this zoom level, cache with bbox string
+        boolean cacheTileOnly = false;
         Integer count = 0;
-        Integer pointsCount = 0;
+        WMSTile wco = null;
         if (canCache) {
-            //count docs
-            count = getCachedCount(true, requestParams, q, pointType, useBbox);
-            if (count == null || count == 0) {
-                return new WMSTile();
-            }
-
-            //count unique points, if necessary
-            if (count > wmsCacheMaxLayerPoints && pointType.getValue() > 0) {
-                pointsCount = getCachedCount(false, requestParams, q, pointType, useBbox);
-
-                //use bbox when too many points
-                if (pointsCount != null && pointsCount > wmsCacheMaxLayerPoints) {
-                    q += StringUtils.join(origAndBBoxFqs, ",");
-
-                    requestParams.setFq(origAndBBoxFqs);
-                    count = getCachedCount(true, requestParams, q, pointType, useBbox);
-                    requestParams.setFq(originalFqs);
-
-                    if (count == null || count == 0) {
-                        return new WMSTile();
+            // find cached data at this or higher zoom level
+            for (int i = 0; i < PointType.values().length && wco == null; i++) {
+                if (PointType.values()[i].getValue() <= pointType.getValue()) {
+                    wco = wmsCache.getTest(cacheKey, cm, PointType.values()[i]);
+                    if (wco != null) {
+                        wco = wmsCache.getTest(cacheKey + bboxKey, cm, PointType.values()[i]);
                     }
-
-                    useBbox[0] = true;
                 }
             }
-        } else {
-            queryFormatUtils.formatSearchQuery(requestParams, false);
+            if (wco != null) {
+                return wco;
+            }
+
+            //count number of unique points for this zoom level
+            count = getCachedCount(requestParams, cacheKey + pointType.getLabel(), pointType.getLabel());
+            if (count == null || count == 0) {
+                wco = new WMSTile();
+                wmsCache.put(cacheKey, cm, pointType, wco);
+                return wco;
+            }
+
+            // too many points to cache the whole layer, just cache the tile
+            if (count > wmsCacheMaxLayerPoints && pointType.getValue() > 0) {
+                cacheTileOnly = true;
+                cacheKey += bboxKey;
+
+                requestParams.setFq(origAndBBoxFqs);
+                count = getCachedCount(requestParams, cacheKey, pointType.getLabel());
+                requestParams.setFq(originalFqs);
+                requestParams.setFormattedQuery(null); // reset formatted query
+
+                if (count == null || count == 0) {
+                    wco = new WMSTile();
+                    wmsCache.put(cacheKey, cm, pointType, wco);
+                    return wco;
+                }
+            }
         }
+
+        queryFormatUtils.formatSearchQuery(requestParams, false);
 
         List<LegendItem> colours = null;
         int sz = 0;
-        WMSTile wco = null;
         if (canCache) {
-            //iterate from lower value pointTypes up to this one
-            for (int i = 0; !useBbox[0] && i < PointType.values().length && wco == null; i++) {
-                if (PointType.values()[i].getValue() < pointType.getValue()) {
-                    wco = wmsCache.getTest(q, cm, PointType.values()[i]);
-                }
-            }
-
             //not found, create it
-            if (wco == null) {
-                requestParams.setFlimit(-1);
-                requestParams.setFormattedQuery(null);
-                colours = cm.equals("-1") ? null : searchDAO.getColours(requestParams, vars.colourMode);
-                sz = colours == null ? 1 : colours.size() + 1;
+            requestParams.setFlimit(-1);
+            requestParams.setFormattedQuery(null);
+            colours = cm.equals("-1") ? null : searchDAO.getColours(requestParams, vars.colourMode);
+            sz = colours == null ? 1 : colours.size() + 1;
 
-                wco = wmsCache.get(q, cm, pointType);
-            }
-
-            if (wco.getCached()) {
-                return wco;
-            }
+            // initialize wco
+            wco = wmsCache.get(cacheKey, cm, pointType);
         } else {
             wco = new WMSTile();
         }
@@ -2205,301 +1974,253 @@ public class WMSController extends AbstractSecureController{
                 wco.setColourmode(vars.colourMode);
                 wco.setCounts(equivalentTile.getCounts());
                 wco.setPoints(equivalentTile.getPoints());
-                wco.setQuery(q);
+                wco.setQuery(cacheKey);
             } else {
                 //query with the bbox when it cannot be cached
-                if (!canCache || useBbox[0]) requestParams.setFq(origAndBBoxFqs);
+                if (!canCache || cacheTileOnly) {
+                    requestParams.setFq(origAndBBoxFqs);
+                    requestParams.setFormattedQuery(null); // reset formatted query
+                }
 
                 List<Integer> pColour = new ArrayList<Integer>(sz);
                 List<float[]> pointsArrays = new ArrayList<float[]>(sz);
                 List<int[]> countsArrays = cm.equals("-1") ? new ArrayList<int[]>(sz) : null;
 
-                queryTile(requestParams, vars, pointType, countsArrays, pointsArrays, colours, pColour,
-                        bbox, originalFqs, boundingBoxFqs, canCache, count);
+                queryTile(requestParams, vars, pointType, countsArrays, pointsArrays, colours, pColour, cacheTileOnly);
 
                 wco.setBbox(bbox);
                 wco.setColourmode(vars.colourMode);
                 wco.setColours(pColour);
                 if (cm.equals("-1")) wco.setCounts(countsArrays);
                 wco.setPoints(pointsArrays);
-                wco.setQuery(q);
+                wco.setQuery(cacheKey);
             }
 
             if (canCache) {
-                wmsCache.put(q, cm, pointType, wco);
+                wmsCache.put(cacheKey, cm, pointType, wco);
             }
 
             return wco;
         }
     }
 
-    private Integer getCachedCount(boolean docCount, SpatialSearchRequestParams requestParams, String q, PointType pointType, boolean[] useBbox) throws Exception {
+    private Integer getCachedCount(SpatialSearchRequestParams requestParams, String countKey, String facet) throws Exception {
 
         Integer count = null;
 
-        String tag = docCount ? "" : pointType.getLabel();
-
         synchronized (countLock) {
-            count = (Integer) countsCache.get(q + tag);
+            count = (Integer) countsCache.get(countKey);
         }
+
         if (count == null) {
-            requestParams.setPageSize(0);
-            requestParams.setFacet(true);
-            requestParams.setFlimit(0);
-            requestParams.setFacets(new String[]{pointType.getLabel()});
             requestParams.setFormattedQuery(null);
-            if (docCount) {
-                SolrDocumentList result = searchDAO.findByFulltext(requestParams);
-                if (result != null) {
-                    synchronized (countLock) {
-                        count = (int) result.getNumFound();
-                        countsCache.put(q + tag, count);
-                    }
-                }
-            } else {
-                List<GroupFacetResultDTO> result = searchDAO.searchGroupedFacets(requestParams);
-                if (result != null && result.size() > 0) {
-                    synchronized (countLock) {
-                        count = result.get(0).getCount();
-                        countsCache.put(q + tag, count);
-                    }
-                }
+            requestParams.setFacet(false);
+            requestParams.setPageSize(0);
+
+            SolrQuery query = ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).searchRequestToSolrQuery(requestParams, null, null);
+
+            // count unique pointTypes
+            query.add("json.facet", "{ result: \"unique(" + facet + ")\"}");
+            QueryResponse qr = ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).query(query, null);
+
+            count = (Integer) SearchUtils.getVal(qr.getResponse(), "facets", 1);
+
+            synchronized (countLock) {
+                countsCache.put(countKey, count);
             }
         } else {
+            // format requestParams
             queryFormatUtils.formatSearchQuery(requestParams, false);
         }
 
         return count;
     }
 
-    private void queryTile(SpatialSearchRequestParams requestParams, WmsEnv vars, PointType pointType, List<int[]> countsArrays,
-                           List<float[]> pointsArrays, List<LegendItem> colours, List<Integer> pColour,
-                           double[] bbox, String[] originalFqs,
-                           String[] boundingBoxFqs, boolean canCache, int docCount) throws Exception {
+    private void queryTile(SpatialSearchRequestParams requestParams, WmsEnv vars, PointType pointType,
+                           List<int[]> countsArrays, List<float[]> pointsArrays, List<LegendItem> colours,
+                           List<Integer> pColour, boolean cacheTileOnly) throws Exception {
 
-        if (colours != null && colours.size() > 1) {
-            long t1 = System.currentTimeMillis();
-            String[] origFqs = requestParams.getFq();
-
-            int colrmax = -1;
-            long colrmaxtime = -1;
-
-            boolean numericalFacetCategories = vars.colourMode.contains(",");
-
-            //in some instances querying each colour's facet, one by one, is more suitable than pivoting
-            if (numericalFacetCategories || docCount > wmsFacetPivotCutoff || !canCache) {
-                //iterate
-                String[] fqs = new String[requestParams.getFq() == null ? 1 : requestParams.getFq().length + 1];
-                if (requestParams.getFq() != null && requestParams.getFq().length > 0) {
-                    System.arraycopy(requestParams.getFq(), 0, fqs, 1, requestParams.getFq().length);
-                }
-                List<String> fqsDone = new ArrayList<String>(colours != null ? colours.size() : 0);
-
-                //draw grouped points before drawing other points.
-                boolean otherPointsAdded = false;
-                pointsArrays.add(null);
-                pColour.add(null);
-
-                for (int i = 0; i < colours.size(); i++) {
-                    LegendItem li = colours.get(i);
-
-                    fqs[0] = li.getFq();
-
-                    //invert fq
-                    if (StringUtils.isEmpty(li.getName())) {
-                        //li.getFq() is of the form "-(...)"
-                        fqsDone.add(fqs[0].substring(1));
-                    } else {
-                        if (fqs[0].charAt(0) == '-') {
-                            fqsDone.add(fqs[0].substring(1));
-                        } else {
-                            fqsDone.add("-" + fqs[0]);
-                        }
-                    }
-
-                    requestParams.setFq(fqs);
-                    long ms = System.currentTimeMillis();
-                    requestParams.setFlimit(-1);
-
-                    requestParams.setFormattedQuery(null);
-                    makePointsFromFacet(searchDAO.getFacetPointsShort(requestParams, pointType.getLabel()), pointsArrays, countsArrays);
-                    pColour.add(li.getColour() | (vars.alpha << 24));
-                    colrmaxtime = (System.currentTimeMillis() - ms);
-
-                    //in the last iteration check for more and batch.
-                    if (i == ColorUtil.colourList.length - 2 && colours.size() == ColorUtil.colourList.length - 1) {
-                        colrmax = i;
-
-                        fqs = new String[(requestParams.getFq() == null ? 0 : requestParams.getFq().length) + fqsDone.size()];
-                        if (requestParams.getFq() != null && requestParams.getFq().length > 0) {
-                            System.arraycopy(requestParams.getFq(), 0, fqs, fqsDone.size(), requestParams.getFq().length);
-                        }
-                        System.arraycopy(fqsDone.toArray(new String[]{}), 0, fqs, 0, fqsDone.size());
-
-                        //do full query
-                        requestParams.setFq(origFqs);
-                        String prevColourMode = vars.colourMode;
-                        vars.colourMode = "-1";
-                        WMSTile equivalentTile = getWMSCacheObject(requestParams, vars, pointType, bbox, originalFqs, boundingBoxFqs, canCache);
-                        vars.colourMode = prevColourMode;
-
-                        if (equivalentTile.getPoints() != null && equivalentTile.getPoints().size() > 0 && equivalentTile.getPoints().get(0).length > 0) {
-                            pointsArrays.set(0, equivalentTile.getPoints().get(0));
-                            //countsArrays.add(equivalentTile.getCounts().get(0));
-                            pColour.set(0, ColorUtil.colourList[ColorUtil.colourList.length - 1] | (vars.alpha << 24));
-                            otherPointsAdded = true;
-                        }
-                    }
-                }
-
-                if (!otherPointsAdded) {
-                    pointsArrays.remove(0);
-                    pColour.remove(0);
-                }
-
-                //restore the altered fqs
-                requestParams.setFq(origFqs);
-            }
-
-            long t2 = System.currentTimeMillis();
-
-            //pivot
-            if (!numericalFacetCategories && docCount <= wmsFacetPivotCutoff && canCache) {
-                requestParams.setFacets(new String[]{vars.colourMode + "," + pointType.getLabel()});
-                requestParams.setFlimit(-1);
-                requestParams.setFormattedQuery(null);
-                //get pivot and drill to colourMode level
-                List<FacetPivotResultDTO> qr = searchDAO.searchPivot(requestParams);
-                if (qr != null && qr.size() > 0) {
-                    List<FacetPivotResultDTO> piv = qr.get(0).getPivotResult();
-
-                    //last colour
-                    int lastColour = ColorUtil.colourList[ColorUtil.colourList.length - 1] | (vars.alpha << 24);
-
-                    //get facet points, retain colours order so it does not break hq
-                    for (int i = 0; i < colours.size(); i++) {
-                        LegendItem li = colours.get(i);
-
-                        int j = 0;
-                        while (!piv.isEmpty() && j < piv.size()) {
-                            FacetPivotResultDTO p = piv.get(j);
-                            if ((StringUtils.isEmpty(li.getName()) && StringUtils.isEmpty(p.getValue()))
-                                    || (StringUtils.isNotEmpty(li.getName()) && li.getName().equals(p.getValue()))) {
-                                // TODO: What to do when this is null?
-                                List<FacetPivotResultDTO> pivotResult = p.getPivotResult();
-                                makePointsFromPivot(pivotResult, pointsArrays, countsArrays);
-                                pColour.add(li.getColour() | (vars.alpha << 24));
-                                piv.remove(j);
-                                break;
-                            } else {
-                                j++;
-                            }
-                        }
-                    }
-
-                    // ensure all point/colour pairs are added
-                    while (!piv.isEmpty()) {
-                        // TODO: What to do when this is null?
-                        List<FacetPivotResultDTO> pivotResult = piv.get(0).getPivotResult();
-                        makePointsFromPivot(pivotResult, pointsArrays, countsArrays);
-                        pColour.add(lastColour);
-                        piv.remove(0);
-                    }
-                }
-            }
-
-            long t3 = System.currentTimeMillis();
-
-            if (logger.isDebugEnabled()) {
-                int occurrences = 0;
-                int points = 0;
-                int colourMatches = pointsArrays.size();
-                for (int i = 0; i < pointsArrays.size(); i++) {
-                    points += pointsArrays.get(i).length;
-                    if (countsArrays != null) {
-                        for (int j = 0; j < pointsArrays.get(i).length; j++) {
-                            occurrences += countsArrays.get(i)[j];
-                        }
-                    }
-                }
-
-                logger.debug("wms timings: many queries=" + (t2 - t1) + "ms, pivot=" + (t3 - t2) + "ms, " +
-                        "colours=" + colours.size() + ", points=" + points + ", occurrences=" + occurrences + ", " +
-                        "matchedColours=" + colourMatches + ", max colour idx=" + colrmax + ", " +
-                        "max colour request time=" + colrmaxtime + "ms, query docCount=" + docCount);
-            }
-
+        boolean lastFacetIsAggregate = colours != null && colours.size() == ColorUtil.colourList.length - 1;
+        if (lastFacetIsAggregate) {
+            pointsArrays.add(null);
+            pColour.add(null);
         }
-        //get points for occurrences not in colours.
+
+        boolean numericalFacetCategories = vars.colourMode.contains(",");
+
+        //in some instances querying each colour's facet, one by one, is more suitable than pivoting
+        requestParams.setFlimit(-1);
+        requestParams.setFormattedQuery(null);
+        requestParams.setFacet(false);
+        requestParams.setPageSize(0);
+
+        SolrQuery query = ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).searchRequestToSolrQuery(requestParams, null, null);
+
+        query.add("json.facet", buildJsonFacet(cacheTileOnly, numericalFacetCategories, colours, vars, pointType));
+
+        QueryResponse qr = ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).query(query, null);
+
+        SimpleOrderedMap facets = SearchUtils.getMap(qr.getResponse(), "facets");
+
         if (colours == null || colours.isEmpty() || colours.size() == 1) {
-            requestParams.setFlimit(-1);
-            requestParams.setFormattedQuery(null);
-            makePointsFromFacet(searchDAO.getFacetPointsShort(requestParams, pointType.getLabel()), pointsArrays, countsArrays);
+            // There is only a facet f0 when there is only one colour.
+            List<SimpleOrderedMap> pointBuckets = SearchUtils.getList(facets, "f0", "buckets");
+            makePointsFromBuckets(pointBuckets, pointsArrays, countsArrays);
             if (colours == null || colours.isEmpty()) {
                 pColour.add(vars.colour);
             } else {
                 pColour.add(colours.get(0).getColour() | (vars.alpha << 24));
             }
-        }
-    }
+        } else {
+            //last colour
+            int lastColour = ColorUtil.colourList[ColorUtil.colourList.length - 1] | (vars.alpha << 24);
 
-    private void makePointsFromPivot(List<FacetPivotResultDTO> pivotResult, List<float[]> gPoints, List<int[]> gCount) {
-        Objects.requireNonNull(pivotResult, "Pivot result was null");
-        float[] points = new float[2 * pivotResult.size()];
-        int[] count = new int[pivotResult.size()];
-        int i = 0;
-        int j = 0;
-        for (FacetPivotResultDTO fpr : pivotResult) {
-            String v = fpr.getValue();
-            if (StringUtils.isNotEmpty(v)) {
-                int p = v.indexOf(',');
-                points[i++] = Float.parseFloat(v.substring(p + 1));
-                points[i++] = Float.parseFloat(v.substring(0, p));
-                count[j++] = fpr.getCount();
-            } else {
-                points[i++] = Float.NaN;
-                i++;
-                count[j++] = 0;
-            }
-        }
+            // buildJsonFacet facets will contain the term facet 'facets' or facet queries 'f[0..n]'
+            List<SimpleOrderedMap> missingPointBuckets = SearchUtils.getList(facets, "terms", "missing", "points", "buckets");
+            List<SimpleOrderedMap> termsBuckets = SearchUtils.getList(facets, "terms", "buckets");
 
-        gPoints.add(points);
-        if (gCount != null) gCount.add(count);
-    }
+            for (int i = 0; i < colours.size(); i++) {
+                LegendItem li = colours.get(i);
 
-    private void makePointsFromFacet(FacetField facet, List gPoints, List gCount) {
-        float[] points = new float[2 * facet.getValues().size()];
-        int[] count = new int[facet.getValues().size()];
-        int i = 0;
-        int j = 0;
-        for (FacetField.Count s : facet.getValues()) {
-            try {
-                String v = s.getName();
-                if (v != null) {
-                    int p = v.indexOf(',');
-                    float lng = Float.parseFloat(v.substring(p + 1));
-                    float lat = Float.parseFloat(v.substring(0, p));
-                    int c = (int) s.getCount();
-                    points[i++] = lng;
-                    points[i++] = lat;
-                    count[j++] = c;
+                SimpleOrderedMap facet = (SimpleOrderedMap) facets.get("f" + i);
+                List<SimpleOrderedMap> pointBuckets = SearchUtils.getList(facet, "f" + i, "buckets");
+                if (pointBuckets != null) {
+                    // buildJsonFacet produced facet queries in the same order as colours
+                    makePointsFromBuckets(pointBuckets, pointsArrays, countsArrays);
+                    pColour.add(li.getColour() | (vars.alpha << 24));
                 } else {
-                    points[i++] = Float.NaN;
-                    i++;
-                    count[j++] = 0;
+                    // buildJsonFacet produced facet terms and missing point buckets. Order is unknown
+
+                    // Is this missing colours?
+                    if (li.getFq().endsWith("]")) { // This is set in SearchDAOImpl.getLegend when the facet name is null.
+                        makePointsFromBuckets(missingPointBuckets, pointsArrays, countsArrays);
+                        pColour.add(li.getColour() | (vars.alpha << 24));
+                    } else {
+                        // Search through termsBuckets
+                        for (int j = 0; j < termsBuckets.size(); j++) {
+                            SimpleOrderedMap bucket = termsBuckets.get(j);
+                            String name = (String) bucket.get("val");
+                            if ((StringUtils.isEmpty(li.getName()) && StringUtils.isEmpty(name))
+                                    || (StringUtils.isNotEmpty(li.getName()) && li.getName().equals(name))) {
+                                List<SimpleOrderedMap> termPointBuckets = SearchUtils.getList(bucket, "points", "buckets");
+                                makePointsFromBuckets(termPointBuckets, pointsArrays, countsArrays);
+                                pColour.add(li.getColour() | (vars.alpha << 24));
+                                termsBuckets.remove(j);
+                                break;
+                            }
+                        }
+                    }
                 }
-            } catch (Exception e) {
+            }
+
+            // ensure all point/colour pairs are added from the term facets
+            while (termsBuckets != null && !termsBuckets.isEmpty()) {
+                List<SimpleOrderedMap> pointBuckets = SearchUtils.getList(termsBuckets, 0, "points", "buckets");
+                makePointsFromBuckets(pointBuckets, pointsArrays, countsArrays);
+                pColour.add(lastColour);
+                termsBuckets.remove(0);
+            }
+
+            if (lastFacetIsAggregate) {
+                // A placeholder for the aggregate facet is already created. Use it.
+                pColour.set(0, pColour.get(pColour.size() - 1));
+                pointsArrays.set(0, pointsArrays.get(pointsArrays.size() - 1));
+                pColour.remove(pColour.size() - 1);
+                pointsArrays.remove(pointsArrays.size() - 1);
             }
         }
+    }
 
-        //duplicate the last point in case of errors above
-        while (i < points.length && i > 1) {
-            points[i] = points[i - 2];
-            i++;
+    private String buildJsonFacet(boolean cacheTileOnly, boolean numericalFacetCategories, List<LegendItem> colours, WmsEnv vars, PointType pointType) {
+
+        // get unique pointTypes
+        StringBuilder jsonFacet = new StringBuilder("{");
+        if (colours == null || colours.size() == 1) {
+            jsonFacet.append("f0: { type:terms, field:").append(pointType.getLabel()).append(",limit:-1}");
+        } else if (!cacheTileOnly && !numericalFacetCategories) {
+            // The query is without a bounding box so the returned facets will be in the same order (count desc)
+            // as colours LegendItems.
+            int limit = colours.size();
+            if (colours.size() == ColorUtil.colourList.length - 1) {
+                // The last LegendItem in colours is the 'other' aggregate. Reduce the limit size by 1 set
+                // pointsArray[0] to all unique points. These points will be drawn first and overdrawn by
+                // subsequent pointsArray lists.
+                limit = colours.size() - 1;
+            }
+            jsonFacet.append("terms: { type:terms, missing: true, field:").append(vars.colourMode).append(", limit:")
+                    .append(limit).append(",facet: { points: { type:terms, field:")
+                    .append(pointType.getLabel()).append(",limit:-1}}}}");
+        } else if (colours.size() >= ColorUtil.colourList.length - 1 || numericalFacetCategories) {
+            // Use json.facet with filters > facets exceeds number of colours otherwise the applied bounding box
+            // may not return a facet. This is important because of the order that facets is drawn on the tile
+            // must be consistent and the order of facets returned varies when the tile bounding box is used.
+            List<String> fqsDone = new ArrayList<String>(colours != null ? colours.size() : 0);
+            boolean lastFacetIsAggregate = colours.size() == ColorUtil.colourList.length - 1;
+            for (int i = 0; i < colours.size(); i++) {
+                if (i == 0) jsonFacet.append(",");
+                String fq;
+                if (i == ColorUtil.colourList.length - 2 && lastFacetIsAggregate) {
+                    // This is the facet containing the aggregated colours items. It only exists for the last
+                    // LegendItem in colours and when colours.size() is at its largest size possible.
+                    fq = StringUtils.join(fqsDone, " AND ");
+                } else {
+                    LegendItem li = colours.get(i);
+                    fq = li.getFq().replace("\"", "\\\\");
+
+                    //invert fq for the 'other' group
+                    if (StringUtils.isEmpty(li.getName())) {
+                        //li.getFq() is of the form "-(...)"
+                        fqsDone.add(li.getFq().substring(1));
+                    } else {
+                        if (li.getFq().charAt(0) == '-') {
+                            fqsDone.add(li.getFq().substring(1));
+                        } else {
+                            fqsDone.add("-" + li.getFq());
+                        }
+                    }
+                }
+                jsonFacet.append("f").append(i).append(":{type:query,limit:-1,q:\"").append(fq)
+                        .append("\",facet:{points:{type:terms,limit:-1,field:")
+                        .append(pointType.getLabel()).append("}}}");
+            }
+
+            jsonFacet.append("}");
         }
-        while (j < count.length && j > 0) {
-            count[j] = 0;
-            j++;
+        return jsonFacet.toString();
+    }
+
+    private void makePointsFromBuckets(List<SimpleOrderedMap> buckets, List<float[]> gPoints, List<int[]> gCount) {
+        float[] points = null;
+        int[] count = null;
+
+        if (buckets != null && buckets.size() > 0) {
+            points = new float[2 * buckets.size()];
+            count = new int[buckets.size()];
+
+            int i = 0;
+            int j = 0;
+            for (SimpleOrderedMap bucket : buckets) {
+                // each bucket has a val (String) and a count (Long)
+                Iterator<Map.Entry<String, Object>> iterator = bucket.iterator();
+                while (iterator.hasNext()) {
+                    Map.Entry<String, Object> next = iterator.next();
+                    if (next.getValue() instanceof String) {
+                        String point = (String) next.getValue();
+                        if (StringUtils.isNotEmpty(point)) {
+                            int p = point.indexOf(',');
+                            points[i++] = Float.parseFloat(point.substring(p + 1));
+                            points[i++] = Float.parseFloat(point.substring(0, p));
+                        } else {
+                            points[i++] = Float.NaN;
+                            i++;
+                            count[j] = 0;
+                        }
+                    } else {
+                        count[j] = 0;
+                    }
+                }
+                j++;
+            }
         }
 
         gPoints.add(points);
@@ -2529,8 +2250,8 @@ public class WMSController extends AbstractSecureController{
                 try {
                     GeneralDirectPosition sourceCoords = new GeneralDirectPosition(lng, lat);
                     DirectPosition targetCoords = transformFrom4326.getMathTransform().transform(sourceCoords, null);
-                    x = scaleLongitudeForImage(targetCoords.getOrdinate(0), left, right, width);
-                    y = scaleLatitudeForImage(targetCoords.getOrdinate(1), top, bottom, height);
+                    x = SpatialUtils.scaleLongitudeForImage(targetCoords.getOrdinate(0), left, right, width);
+                    y = SpatialUtils.scaleLatitudeForImage(targetCoords.getOrdinate(1), top, bottom, height);
 
                     //System.out.println("Drawing an oval.....");
                     imgObj.g.fillOval(x - vars.size, y - vars.size, pointWidth, pointWidth);
@@ -2593,23 +2314,5 @@ public class WMSController extends AbstractSecureController{
 
     public void setOrgEmail(String orgEmail) {
         this.orgEmail = orgEmail;
-    }
-}
-
-class ImgObj {
-
-    final Graphics2D g;
-    final BufferedImage img;
-
-    public static ImgObj create(int width, int height) {
-        BufferedImage img = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = (Graphics2D) img.getGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        return new ImgObj(g, img);
-    }
-
-    public ImgObj(Graphics2D g, BufferedImage img) {
-        this.g = g;
-        this.img = img;
     }
 }

@@ -100,35 +100,23 @@ public interface SearchDAO {
     /**
      * Write out the results of this query to the output stream
      * 
-     * @param searchParams
      * @param out
-     * @param maxNoOfRecords
-     * @param includeSensitive Whether or not the sensitive values should be included in the download
+     * @param downloadDetails
+     * @param limit
      * @return A map of uids and counts that needs to be logged to the ala-logger
      * @throws Exception
      */
-	ConcurrentMap<String, AtomicInteger> writeResultsToStream(DownloadRequestParams searchParams, OutputStream out, int maxNoOfRecords, boolean includeSensitive, DownloadDetailsDTO dd, boolean limit) throws Exception;
-	
-	/**
-	 * Writes the results of this query to the output stream using the index as a source of the data.
-	 * @param downloadParams
-	 * @param out
-	 * @param includeSensitive
-	 * @return
-	 * @throws Exception
-	 */
-	ConcurrentMap<String, AtomicInteger> writeResultsFromIndexToStream(DownloadRequestParams downloadParams, OutputStream out, boolean includeSensitive, DownloadDetailsDTO dd, boolean checkLimit) throws Exception;
+    ConcurrentMap<String, AtomicInteger> writeResultsToStream(OutputStream out, DownloadDetailsDTO downloadDetails, boolean limit) throws Exception;
 
     /**
      * Writes the results of this query to the output stream using the index as a source of the data.
-     * @param downloadParams
      * @param out
-     * @param includeSensitive
+     * @param downloadDetails
      * @param parallelQueryExecutor The ExecutorService to manage parallel query executions
      * @return
      * @throws Exception
      */
-    ConcurrentMap<String, AtomicInteger> writeResultsFromIndexToStream(DownloadRequestParams downloadParams, OutputStream out, boolean includeSensitive, DownloadDetailsDTO dd, boolean checkLimit, ExecutorService parallelQueryExecutor) throws Exception;
+    ConcurrentMap<String, AtomicInteger> writeResultsFromIndexToStream(OutputStream out, DownloadDetailsDTO downloadDetails, boolean checkLimit, ExecutorService parallelQueryExecutor) throws Exception;
 
     /**
      * Write coordinates out to the supplied stream.
@@ -137,7 +125,7 @@ public interface SearchDAO {
      * @param out
      * @throws Exception
      */
-    void writeCoordinatesToStream(SearchRequestParams searchParams,OutputStream out) throws Exception;
+    void writeCoordinatesToStream(SpatialSearchRequestParams searchParams, OutputStream out) throws Exception;
 
     /**
      * Write facet content to supplied output stream
@@ -147,10 +135,10 @@ public interface SearchDAO {
      * @param lookupName
      * @param includeSynonyms
      * @param out
-     * @param dd
+     * @param downloadDetails
      * @throws Exception
      */
-    void writeFacetToStream(SpatialSearchRequestParams searchParams, boolean includeCount, boolean lookupName, boolean includeSynonyms, boolean includeLists, OutputStream out, DownloadDetailsDTO dd) throws Exception;
+    void writeFacetToStream(SpatialSearchRequestParams searchParams, boolean includeCount, boolean lookupName, boolean includeSynonyms, boolean includeLists, OutputStream out, DownloadDetailsDTO downloadDetails) throws Exception;
 
     /**
      * Write endemic parentQuery.facets()[0] content to supplied output stream that only occur in the subQuery
@@ -283,15 +271,6 @@ public interface SearchDAO {
     Map<String, Integer> getOccurrenceCountsForTaxa(List<String> taxa, String[] filterQueries) throws Exception;
 
     /**
-     * Returns the scientific name and counts for the taxon rank that proceed or include the supplied rank.
-     * @param breakdownParams
-     * @param query
-     * @return
-     * @throws Exception
-     */
-    TaxaRankCountDTO findTaxonCountForUid(BreakdownRequestParams breakdownParams,String query) throws Exception;
-
-    /**
      * Find all species (and counts) for a given query.
      * @param requestParams
      * @return
@@ -413,7 +392,8 @@ public interface SearchDAO {
      * @return
      * @throws Exception
      */
-    List<FieldStatsItem> searchStat(SpatialSearchRequestParams searchParams, String field, String facet) throws Exception;
+    List<FieldStatsItem> searchStat(SpatialSearchRequestParams searchParams, String field, String facet
+            , Collection<String> statType) throws Exception;
 
     /**
      * Return legend items for a query and facet.
