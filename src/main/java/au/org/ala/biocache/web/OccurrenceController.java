@@ -673,16 +673,6 @@ public class OccurrenceController extends AbstractSecureController {
 
         return adto;
     }
-
-    /**
-     * Returns the complete list of Occurrences
-     */
-    @RequestMapping(value = {"/occurrences", "/occurrences/collections", "/occurrences/institutions", "/occurrences/dataResources", "/occurrences/dataProviders", "/occurrences/taxa", "/occurrences/dataHubs"}, method = RequestMethod.GET)
-    public @ResponseBody SearchResultDTO listOccurrences(Model model) throws Exception {
-        SpatialSearchRequestParams srp = new SpatialSearchRequestParams();
-        srp.setQ("*:*");
-        return occurrenceSearch(srp);
-    }
     
     /**
      * Occurrence search page uses SOLR JSON to display results
@@ -749,33 +739,6 @@ public class OccurrenceController extends AbstractSecureController {
         return occurrenceSearch(requestParams);
     }
     
-    /**
-     * Spatial search for either a taxon name or full text text search
-     * @param model
-     * @deprecated use {@link #occurrenceSearch(SpatialSearchRequestParams)}
-     * @return
-     * @throws Exception
-     */
-    @RequestMapping(value =  "/occurrences/searchByArea*", method = RequestMethod.GET)
-    @Deprecated
-    public @ResponseBody SearchResultDTO occurrenceSearchByArea(SpatialSearchRequestParams requestParams,
-                                                                Model model) throws Exception {
-        SearchResultDTO searchResult = new SearchResultDTO();
-        
-        if (StringUtils.isEmpty(requestParams.getQ())) {
-            return searchResult;
-        }
-        
-        searchResult = searchDAO.findByFulltextSpatialQuery(requestParams,null);
-        model.addAttribute("searchResult", searchResult);
-        
-        if(logger.isDebugEnabled()){
-            logger.debug("Returning results set with: " + searchResult.getTotalRecords());
-        }
-        
-        return searchResult;
-    }
-    
     private SearchResultDTO occurrenceSearch(SpatialSearchRequestParams requestParams)throws Exception{
         return occurrenceSearch(requestParams,null,false,null,null);
     }
@@ -786,7 +749,7 @@ public class OccurrenceController extends AbstractSecureController {
      * @return
      * @throws Exception
      */
-    @RequestMapping(value = {"/occurrences/search.json*","/occurrences/search*"}, method = RequestMethod.GET)
+    @RequestMapping(value = {"/occurrences/search.json*", "/occurrences/search*", "/occurrences", "/occurrences/collections", "/occurrences/institutions", "/occurrences/dataResources", "/occurrences/dataProviders", "/occurrences/taxa", "/occurrences/dataHubs", "/occurrences/searchByArea*"}, method = RequestMethod.GET)
     public @ResponseBody SearchResultDTO occurrenceSearch(SpatialSearchRequestParams requestParams,
                                                           @RequestParam(value="apiKey", required=false) String apiKey,
                                                           @RequestParam(value="im", required=false, defaultValue = "false") Boolean lookupImageMetadata,
@@ -1286,8 +1249,7 @@ public class OccurrenceController extends AbstractSecureController {
     @RequestMapping(value="/occurrences/coordinates*")
     public void dumpDistinctLatLongs(SpatialSearchRequestParams requestParams, HttpServletResponse response) throws Exception {
         requestParams.setFacets(new String[]{"lat_long"});
-        if(requestParams.getQ().length()<1)
-            requestParams.setQ("*:*");
+
         try {
             ServletOutputStream out = response.getOutputStream();
             searchDAO.writeCoordinatesToStream(requestParams,out);

@@ -38,7 +38,11 @@ public class GetMap {
     }
 
     public void setSrs(String srs) {
-        this.srs = srs;
+        if ("EPSG:900913".equalsIgnoreCase(srs)) {
+            this.srs = "EPSG:3857";
+        } else {
+            this.srs = srs;
+        }
     }
 
     public String getStyles() {

@@ -70,6 +70,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 import javax.inject.Inject;
 import javax.servlet.ServletOutputStream;
 import java.io.*;
@@ -361,6 +362,15 @@ public class SearchDAOImpl implements SearchDAO {
      * Initialise the SOLR server instance
      */
     public SearchDAOImpl() {
+    }
+
+    @PreDestroy
+    public void destroy() throws Exception {
+        // close SOLR connection
+        solrClient.close();
+
+        // close Cassandra connection
+        Config.persistenceManager().shutdown();
     }
 
     @PostConstruct
@@ -1878,6 +1888,8 @@ public class SearchDAOImpl implements SearchDAO {
         solrQuery.setRequestHandler("standard");
         solrQuery.setQuery(searchParams.getFormattedQuery());
         solrQuery.setRows(0);
+        solrQuery.setFields("id");
+        solrQuery.setSort("id", SolrQuery.ORDER.asc);
         solrQuery.setFacet(true);
         solrQuery.addFacetField(pointType.getLabel());
         solrQuery.setFacetMinCount(1);
@@ -2037,7 +2049,7 @@ public class SearchDAOImpl implements SearchDAO {
         }
         List<String> fqList = new ArrayList<String>();
         //only add the FQ's if they are not the default values
-        if (requestParams.getFormattedFq().length > 0) {
+        if (requestParams.getFormattedFq() != null && requestParams.getFormattedFq().length > 0) {
             org.apache.commons.collections.CollectionUtils.addAll(fqList, requestParams.getFormattedFq());
         }
         List<TaxaCountDTO> speciesWithCounts = getSpeciesCounts(queryString, fqList, CollectionUtils.arrayToList(requestParams.getFacets()), requestParams.getPageSize(), requestParams.getStart(), requestParams.getSort(), requestParams.getDir());
@@ -2687,7 +2699,9 @@ public class SearchDAOImpl implements SearchDAO {
         }
         //set the facet starting point based on the paging information
         solrQuery.setFacetMinCount(1);
+        int ps = pageSize >= 0 ? pageSize : Integer.MAX_VALUE;
         solrQuery.setFacetLimit(pageSize); // unlimited = -1 | pageSize
+        solrQuery.setFields("id");
         solrQuery.add("facet.offset", Integer.toString(startIndex));
         if (logger.isDebugEnabled()) {
             logger.debug("getSpeciesCount query :" + solrQuery.getQuery());
@@ -3577,6 +3591,7 @@ public class SearchDAOImpl implements SearchDAO {
                 if (logger.isDebugEnabled()) {
                     logger.debug("SOLR query:" + query.toString());
                 }
+                logger.error("SOLR query:" + query.toString());
 
                 final SolrDocumentList list = new SolrDocumentList();
                 StreamingResponseCallback response = new StreamingResponseCallback() {
@@ -4273,30 +4288,38 @@ public class SearchDAOImpl implements SearchDAO {
     }
 
     private ModifiableSolrParams buildSearchExpr(SolrQuery query) {
-        StringBuilder cexpr = new StringBuilder();
-        cexpr.append("select(biocache1, q=\"").append(query.getQuery()).append("\"");
-        cexpr.append(", sort=\"").append("el899 asc, el898 asc").append("\"");
+        ModifiableSolrParams paramsLoc = new ModifiableSolrParams();
+
+        paramsLoc.set("q", query.getQuery());
+
         if (query.getFacetQuery() != null) {
             for (String fq : query.getFacetQuery()) {
-                cexpr.append(", fq=\"").append(fq).append("\"");
+                if (StringUtils.isNotEmpty(fq)) {
+                    paramsLoc.add("fq", fq);
+                }
             }
+        }
+        String[] fl = new String[]{"id"};
+        if (StringUtils.isNotEmpty(query.getFields())) {
+            fl = query.getFields().split(",");
+            paramsLoc.set("fl", query.getFields());
+        } else {
+            paramsLoc.set("fl", "id");
+        }
+
+        if (StringUtils.isEmpty(query.getSortField()) || !ArrayUtils.contains(fl, query.getSortField().split(" ")[0])) {
+            paramsLoc.set("sort", fl[0] + " asc");
+        } else {
+            paramsLoc.set("sort", "index asc");
         }
 
         String qt = "/export";
         if (query.getStart() > 0 || query.getRows() < EXPORT_THREASHOLD) {
-            cexpr.append(", rows=").append(query.getRows());
-            cexpr.append(", start=").append(query.getStart());
+            paramsLoc.set("rows", query.getRows());
+            paramsLoc.set("start", query.getStart());
             qt = "/select";
         }
-        cexpr.append(", qt=").append(qt).append(")");
-
-        ModifiableSolrParams paramsLoc = new ModifiableSolrParams();
-        paramsLoc.set("expr", cexpr.toString());
         paramsLoc.set("qt", qt);
-
-        paramsLoc.set("q", query.getQuery());
-        paramsLoc.set("fl", query.getFields());
-        paramsLoc.set("sort", query.getSortField());
 
         return paramsLoc;
     }
@@ -4312,7 +4335,8 @@ public class SearchDAOImpl implements SearchDAO {
 
         cexpr.append(", buckets=\"").append(facetName).append("\"");
         cexpr.append(", bucketSorts=\"count(*) desc\"");
-        cexpr.append(", bucketSizeLimit=").append(query.getFacetLimit());
+        int limit = query.getFacetLimit() >= 0 ? query.getFacetLimit() : Integer.MAX_VALUE;
+        cexpr.append(", bucketSizeLimit=").append(limit);
         cexpr.append(", count(*))");
 
         String qt = "/stream";

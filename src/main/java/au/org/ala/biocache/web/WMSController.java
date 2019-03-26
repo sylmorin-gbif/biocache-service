@@ -143,7 +143,7 @@ public class WMSController extends AbstractSecureController{
     @Value("${biocache.ui.url:https://biocache.ala.org.au}")
     protected String baseUiUrl;
 
-    @Value("${geoserver.url:http://spatial.ala.org.au/geoserver}")
+    @Value("${geoserver.url:https://spatial.ala.org.au/geoserver}")
     protected String geoserverUrl;
 
     @Value("${organizationName:Atlas of Living Australia}")
@@ -743,22 +743,12 @@ public class WMSController extends AbstractSecureController{
             Model model
     ) throws Exception {
         String taxonName = "";
-        String rank = "";
-        String q = "";
         if (StringUtils.trimToNull(getMetadata.getLayer()) != null) {
             String[] parts = getMetadata.getLayer().split(":");
             taxonName = parts[parts.length - 1];
-            if (parts.length > 1) {
-                rank = parts[0];
-            }
-            q = getMetadata.getLayer();
         } else if (StringUtils.trimToNull(getMetadata.getQuery()) != null) {
             String[] parts = getMetadata.getQuery().split(":");
             taxonName = parts[parts.length - 1];
-            if (parts.length > 1) {
-                rank = parts[0];
-            }
-            q = getMetadata.getQuery();
         } else {
             response.sendError(400);
         }
@@ -831,14 +821,15 @@ public class WMSController extends AbstractSecureController{
             JsonNode classificationNode = node2.get("classification");
             model.addAttribute("kingdom", StringUtils.capitalize(classificationNode.get("kingdom").asText().toLowerCase()));
             model.addAttribute("phylum", StringUtils.capitalize(classificationNode.get("phylum").asText().toLowerCase()));
-            model.addAttribute("clazz", StringUtils.capitalize(classificationNode.get("clazz").asText().toLowerCase()));
+            model.addAttribute("clazz", StringUtils.capitalize(classificationNode.get("class").asText().toLowerCase()));
             model.addAttribute("order", StringUtils.capitalize(classificationNode.get("order").asText().toLowerCase()));
             model.addAttribute("family", StringUtils.capitalize(classificationNode.get("family").asText().toLowerCase()));
             model.addAttribute("genus", classificationNode.get("genus").asText());
-
-            JsonNode taxonNameNode = node2.get("taxonName");
-            if (taxonNameNode != null && taxonNameNode.get("specificEpithet") != null) {
-                model.addAttribute("specificEpithet", taxonNameNode.get("specificEpithet").asText());
+            if (classificationNode.get("species") != null) {
+                String[] species = classificationNode.get("species").asText().split(" ");
+                if (species.length == 2) {
+                    model.addAttribute("specificEpithet", species[1]);
+                }
             }
         }
 
@@ -2023,7 +2014,7 @@ public class WMSController extends AbstractSecureController{
             query.add("json.facet", "{ result: \"unique(" + facet + ")\"}");
             QueryResponse qr = ((SearchDAOImpl) ((Advised) searchDAO).getTargetSource().getTarget()).query(query, null);
 
-            count = (Integer) SearchUtils.getVal(qr.getResponse(), "facets", 1);
+            count = ((Long) SearchUtils.getVal(qr.getResponse(), "facets", 1)).intValue();
 
             synchronized (countLock) {
                 countsCache.put(countKey, count);
@@ -2136,7 +2127,7 @@ public class WMSController extends AbstractSecureController{
         // get unique pointTypes
         StringBuilder jsonFacet = new StringBuilder("{");
         if (colours == null || colours.size() == 1) {
-            jsonFacet.append("f0: { type:terms, field:").append(pointType.getLabel()).append(",limit:-1}");
+            jsonFacet.append("f0: { type:terms, field:").append(pointType.getLabel()).append(",limit:-1}}");
         } else if (!cacheTileOnly && !numericalFacetCategories) {
             // The query is without a bounding box so the returned facets will be in the same order (count desc)
             // as colours LegendItems.
