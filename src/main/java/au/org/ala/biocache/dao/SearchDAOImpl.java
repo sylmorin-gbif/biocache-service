@@ -4266,7 +4266,7 @@ public class SearchDAOImpl implements SearchDAO {
                 String year = df.format(date);
                 return year + "-" + (Integer.parseInt(year) + 9);
             } catch (ParseException pe) {
-                return facet;
+                return value;
             }
             //1850-01-01T00:00:00Z
         } else if (searchUtils.getAuthIndexFields().contains(facet)) {
